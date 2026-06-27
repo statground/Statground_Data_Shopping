@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	htmlpkg "html"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -61,6 +63,12 @@ var DetailSourceMode = "both"
 // "korean" : 국내만
 // "global" : 글로벌만
 
+var ListSourceMode = "gsearch_ajax"
+
+// "gsearch_ajax" : gsearch.gmarket.co.kr 목록 AJAX endpoint를 직접 호출
+// "browser"      : 브라우저로 목록 페이지를 렌더링
+// "auto"         : 브라우저를 먼저 시도하고 실패하면 gsearch AJAX로 보충
+
 // ============================================================
 // 병렬/안정성 설정
 // ============================================================
@@ -68,6 +76,7 @@ var DetailSourceMode = "both"
 // 차단 페이지가 자주 뜨면 2 / 2 권장
 var DetailProductConcurrency = 2
 var DetailPageConcurrency = 2
+var ListPageConcurrency = 2
 
 var Headless = true
 
@@ -92,12 +101,14 @@ var DescriptionImageMax = 30
 
 var SaveDebugHTML = false
 var AllowEmptyResult = false
+var CollectDetailsEnabled = true
 
 func ApplyEnvConfig() {
 	setStringFromEnv("GMARKET_COLLECT_MODE", &CollectMode)
 	setStringFromEnv("GMARKET_INPUT_FILE", &InputFile)
 	setStringFromEnv("GMARKET_OUTPUT_FILE", &OutputFile)
 	setStringFromEnv("GMARKET_DETAIL_SOURCE_MODE", &DetailSourceMode)
+	setStringFromEnv("GMARKET_LIST_SOURCE_MODE", &ListSourceMode)
 
 	setIntFromEnv("GMARKET_TOTAL_TARGET_PRODUCTS", &TotalTargetProducts)
 	setIntFromEnv("GMARKET_RANDOM_CATEGORY_COUNT", &RandomCategoryCount)
@@ -110,6 +121,7 @@ func ApplyEnvConfig() {
 	setIntFromEnv("GMARKET_LIST_SCROLL_COUNT", &ListScrollCount)
 	setIntFromEnv("GMARKET_DETAIL_SCROLL_COUNT", &DetailScrollCount)
 	setIntFromEnv("GMARKET_DETAIL_RETRY_COUNT", &DetailRetryCount)
+	setIntFromEnv("GMARKET_LIST_PAGE_CONCURRENCY", &ListPageConcurrency)
 
 	setInt64FromEnv("GMARKET_RANDOM_SEED", &RandomSeed)
 
@@ -117,6 +129,7 @@ func ApplyEnvConfig() {
 	setBoolFromEnv("GMARKET_BLOCK_HEAVY_RESOURCES", &BlockHeavyResources)
 	setBoolFromEnv("GMARKET_SAVE_DEBUG_HTML", &SaveDebugHTML)
 	setBoolFromEnv("GMARKET_ALLOW_EMPTY_RESULT", &AllowEmptyResult)
+	setBoolFromEnv("GMARKET_COLLECT_DETAILS", &CollectDetailsEnabled)
 
 	if v := strings.TrimSpace(os.Getenv("GMARKET_SEARCH_KEYWORDS")); v != "" {
 		parts := strings.Split(v, ",")
@@ -178,6 +191,26 @@ type Category struct {
 	Name      string
 	GroupCode string
 	URL       string
+}
+
+type ListJob struct {
+	Label          string
+	Keyword        string
+	SourceURL      string
+	SourceCategory string
+	GroupCode      string
+	SourcePage     string
+	Limit          int
+}
+
+type gmarketSearchAjaxResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	TotalCount int    `json:"totalCount"`
+}
+
+var gmarketHTTPClient = &http.Client{
+	Timeout: 25 * time.Second,
 }
 
 // ============================================================
@@ -1027,6 +1060,7 @@ func ParseListProducts(htmlStr string, sourceURL string, sourceCategory string, 
 
 	productSelector := strings.Join([]string{
 		"a.itemname",
+		"a.item_name",
 		"a.link__item",
 		`a[href*="goodscode="]`,
 		`a[href*="goodsCode="]`,
@@ -1036,8 +1070,10 @@ func ParseListProducts(htmlStr string, sourceURL string, sourceCategory string, 
 
 	nameSelectors := []string{
 		"a.itemname",
+		"a.item_name",
 		"a.link__item",
 		".itemname",
+		".item_name",
 		".link__item",
 		".box__item-title",
 		".text__item",
@@ -1050,6 +1086,8 @@ func ParseListProducts(htmlStr string, sourceURL string, sourceCategory string, 
 	priceSelectors := []string{
 		"div.s-price strong",
 		"div.s-price",
+		".discount_price",
+		".price_cont",
 		".s-price strong",
 		".s-price",
 		".box__price-seller strong",
@@ -1065,6 +1103,7 @@ func ParseListProducts(htmlStr string, sourceURL string, sourceCategory string, 
 	originalPriceSelectors := []string{
 		"div.o-price",
 		".o-price",
+		".orgin_price",
 		".box__price-original",
 		".box__price-coupon",
 		".text__price-original",
@@ -1206,8 +1245,161 @@ func BuildSearchURL(keyword string, page int, pageSize int) string {
 	q.Set("page", strconv.Itoa(page))
 	q.Set("pagesize", strconv.Itoa(pageSize))
 	q.Set("type", "IMG")
+	q.Set("IsGmarketBest", "True")
+	q.Set("IsGlobalSearch", "True")
 
 	return "https://gsearch.gmarket.co.kr/Listview/Search?" + q.Encode()
+}
+
+func FetchGmarketSearchAjaxHTML(keyword string, page int, pageSize int, sourceURL string) (string, int, error) {
+	form := url.Values{}
+	form.Set("type", "IMG")
+	form.Set("page", strconv.Itoa(page))
+	form.Set("pageSize", strconv.Itoa(pageSize))
+	form.Set("keyword", keyword)
+	form.Set("GdlcCd", "")
+	form.Set("GdmcCd", "")
+	form.Set("GdscCd", "")
+	form.Set("priceStart", "")
+	form.Set("priceEnd", "")
+	form.Set("searchType", "IMG")
+	form.Set("IsOversea", "False")
+	form.Set("isDeliveryFeeFree", "")
+	form.Set("isDiscount", "False")
+	form.Set("isGmileage", "False")
+	form.Set("isGStamp", "False")
+	form.Set("isGmarketBest", "True")
+	form.Set("orderType", "")
+	form.Set("listType", "IMG")
+	form.Set("IsBookCash", "False")
+	form.Set("IsGlobalSort", "True")
+	form.Set("DelFee", "")
+	form.Set("CurrPage", "srp")
+	form.Set("isGlobalSite", "true")
+	form.Set("isBigSmileItem", "false")
+
+	req, err := http.NewRequest("POST", "https://gsearch.gmarket.co.kr/SearchService/SeachListTemplateAjax", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("Accept-Language", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	if sourceURL != "" {
+		req.Header.Set("Referer", sourceURL)
+	} else {
+		req.Header.Set("Referer", BuildSearchURL(keyword, page, pageSize))
+	}
+
+	resp, err := gmarketHTTPClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", 0, fmt.Errorf("gsearch ajax http status %d", resp.StatusCode)
+	}
+
+	var payload gmarketSearchAjaxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", 0, err
+	}
+	if !payload.Success {
+		return "", payload.TotalCount, fmt.Errorf("gsearch ajax returned success=false")
+	}
+
+	return payload.Message, payload.TotalCount, nil
+}
+
+func CollectListJobDirect(job ListJob) []Row {
+	pageNum, err := strconv.Atoi(job.SourcePage)
+	if err != nil || pageNum <= 0 {
+		pageNum = 1
+	}
+	pageSize := SearchPageSize
+	if pageSize <= 0 {
+		pageSize = 60
+	}
+	sourceURL := job.SourceURL
+	if sourceURL == "" {
+		sourceURL = BuildSearchURL(job.Keyword, pageNum, pageSize)
+	}
+
+	fmt.Printf("\n[gsearch AJAX 목록 수집] %s\n%s\n", job.Label, sourceURL)
+
+	htmlStr, totalCount, err := FetchGmarketSearchAjaxHTML(job.Keyword, pageNum, pageSize, sourceURL)
+	if err != nil {
+		fmt.Println("gsearch AJAX 목록 오류:", err)
+		return nil
+	}
+
+	rows := ParseListProducts(htmlStr, sourceURL, job.SourceCategory, job.GroupCode, job.Keyword, job.SourcePage)
+	for i := range rows {
+		rows[i]["목록_수집방식"] = "gsearch_ajax"
+		rows[i]["목록_총검색수"] = strconv.Itoa(totalCount)
+	}
+
+	rand.Shuffle(len(rows), func(i, j int) {
+		rows[i], rows[j] = rows[j], rows[i]
+	})
+
+	if job.Limit > 0 && len(rows) > job.Limit {
+		rows = rows[:job.Limit]
+	}
+
+	fmt.Printf("현재 목록 상품 수: %d / totalCount=%d\n", len(rows), totalCount)
+	return rows
+}
+
+func CollectListJobsDirect(jobs []ListJob) []Row {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	concurrency := ListPageConcurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(jobs) {
+		concurrency = len(jobs)
+	}
+
+	fmt.Println("목록 수집 방식: gsearch_ajax")
+	fmt.Println("목록 페이지 동시 처리 수:", concurrency)
+
+	sem := make(chan struct{}, concurrency)
+	resultCh := make(chan []Row, len(jobs))
+	var wg sync.WaitGroup
+
+	for _, job := range jobs {
+		jobCopy := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+			}()
+			time.Sleep(time.Duration(rand.Intn(700)) * time.Millisecond)
+			resultCh <- CollectListJobDirect(jobCopy)
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	allRows := []Row{}
+	for rows := range resultCh {
+		allRows = append(allRows, rows...)
+	}
+
+	return allRows
 }
 
 func BalancedLimitRows(rows []Row, total int) []Row {
@@ -2115,6 +2307,23 @@ func CollectFromBestCategories(ctx context.Context) []Row {
 		fmt.Printf("- %s / %s\n", c.Name, c.URL)
 	}
 
+	if ListSourceMode == "gsearch_ajax" {
+		jobs := []ListJob{}
+		for _, c := range categories {
+			keyword := strings.ReplaceAll(c.Name, "/", " ")
+			jobs = append(jobs, ListJob{
+				Label:          c.Name,
+				Keyword:        keyword,
+				SourceURL:      BuildSearchURL(keyword, 1, SearchPageSize),
+				SourceCategory: c.Name,
+				GroupCode:      c.GroupCode,
+				SourcePage:     "1",
+				Limit:          ProductsPerCategory,
+			})
+		}
+		return CollectListJobsDirect(jobs)
+	}
+
 	for _, c := range categories {
 		fmt.Printf("\n[목록 수집] %s / %s\n", c.Name, c.URL)
 
@@ -2131,6 +2340,20 @@ func CollectFromBestCategories(ctx context.Context) []Row {
 
 		if ProductsPerCategory > 0 && len(rows) > ProductsPerCategory {
 			rows = rows[:ProductsPerCategory]
+		}
+
+		if len(rows) == 0 && ListSourceMode == "auto" {
+			keyword := strings.ReplaceAll(c.Name, "/", " ")
+			fmt.Println("브라우저 목록이 비어 gsearch AJAX 목록으로 보충합니다:", keyword)
+			rows = CollectListJobDirect(ListJob{
+				Label:          c.Name,
+				Keyword:        keyword,
+				SourceURL:      BuildSearchURL(keyword, 1, SearchPageSize),
+				SourceCategory: c.Name,
+				GroupCode:      c.GroupCode,
+				SourcePage:     "1",
+				Limit:          ProductsPerCategory,
+			})
 		}
 
 		fmt.Println("현재 카테고리 상품 수:", len(rows))
@@ -2152,6 +2375,25 @@ func CollectFromSearchKeywords(ctx context.Context) []Row {
 		keywords[i], keywords[j] = keywords[j], keywords[i]
 	})
 
+	if ListSourceMode == "gsearch_ajax" {
+		jobs := []ListJob{}
+		for _, keyword := range keywords {
+			for page := 1; page <= SearchPagesPerKeyword; page++ {
+				sourceURL := BuildSearchURL(keyword, page, SearchPageSize)
+				jobs = append(jobs, ListJob{
+					Label:          fmt.Sprintf("%s / %d페이지", keyword, page),
+					Keyword:        keyword,
+					SourceURL:      sourceURL,
+					SourceCategory: "",
+					GroupCode:      "",
+					SourcePage:     strconv.Itoa(page),
+					Limit:          0,
+				})
+			}
+		}
+		return CollectListJobsDirect(jobs)
+	}
+
 	for _, keyword := range keywords {
 		for page := 1; page <= SearchPagesPerKeyword; page++ {
 			searchURL := BuildSearchURL(keyword, page, SearchPageSize)
@@ -2168,6 +2410,19 @@ func CollectFromSearchKeywords(ctx context.Context) []Row {
 			rand.Shuffle(len(rows), func(i, j int) {
 				rows[i], rows[j] = rows[j], rows[i]
 			})
+
+			if len(rows) == 0 && ListSourceMode == "auto" {
+				fmt.Println("브라우저 검색 목록이 비어 gsearch AJAX 목록으로 보충합니다:", keyword)
+				rows = CollectListJobDirect(ListJob{
+					Label:          fmt.Sprintf("%s / %d페이지", keyword, page),
+					Keyword:        keyword,
+					SourceURL:      searchURL,
+					SourceCategory: "",
+					GroupCode:      "",
+					SourcePage:     strconv.Itoa(page),
+					Limit:          0,
+				})
+			}
 
 			fmt.Println("현재 검색 페이지 상품 수:", len(rows))
 
@@ -2353,6 +2608,10 @@ func CollectListProducts(ctx context.Context) []Row {
 	}
 
 	return unique
+}
+
+func NeedsBrowserForList() bool {
+	return ListSourceMode == "browser" || ListSourceMode == "auto"
 }
 
 // ============================================================
@@ -2809,8 +3068,16 @@ func SaveExcel(resultRows []Row, listRows []Row, detailRows []Row) error {
 			"값":  CollectMode,
 		},
 		{
+			"항목": "목록 수집 방식",
+			"값":  ListSourceMode,
+		},
+		{
 			"항목": "상세 수집 모드",
 			"값":  DetailSourceMode,
+		},
+		{
+			"항목": "목록 페이지 동시 처리 수",
+			"값":  strconv.Itoa(ListPageConcurrency),
 		},
 		{
 			"항목": "상품 동시 처리 수",
@@ -2876,16 +3143,24 @@ func main() {
 
 	fmt.Println("Gmarket Go 크롤러 시작")
 	fmt.Println("수집 모드:", CollectMode)
+	fmt.Println("목록 수집 방식:", ListSourceMode)
 	fmt.Println("상세 수집 모드:", DetailSourceMode)
 	fmt.Println("목표 상품 수:", TotalTargetProducts)
+	fmt.Println("목록 페이지 동시 처리:", ListPageConcurrency)
 	fmt.Println("상세 상품 동시 처리:", DetailProductConcurrency)
 	fmt.Println("상세 페이지 동시 처리:", DetailPageConcurrency)
 
-	ctx, cancel, err := NewBrowserContext()
-	if err != nil {
-		panic(err)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var err error
+
+	if NeedsBrowserForList() {
+		ctx, cancel, err = NewBrowserContext()
+		if err != nil {
+			panic(err)
+		}
+		defer cancel()
 	}
-	defer cancel()
 
 	listRows := CollectListProducts(ctx)
 
@@ -2900,6 +3175,27 @@ func main() {
 		if !AllowEmptyResult {
 			os.Exit(1)
 		}
+	}
+
+	if !CollectDetailsEnabled {
+		fmt.Println("\n상세 수집을 건너뜁니다: GMARKET_COLLECT_DETAILS=false")
+		resultRows := MergeRows(listRows, nil)
+		err = SaveExcel(resultRows, listRows, nil)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println("저장 완료:", OutputFile)
+		fmt.Println("최종 행 수:", len(resultRows))
+		fmt.Println("소요 시간:", time.Since(start))
+		return
+	}
+
+	if ctx == nil {
+		ctx, cancel, err = NewBrowserContext()
+		if err != nil {
+			panic(err)
+		}
+		defer cancel()
 	}
 
 	detailRows := CollectDetails(ctx, listRows)

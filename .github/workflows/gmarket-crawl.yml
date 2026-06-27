@@ -49,6 +49,8 @@ jobs:
       GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '10' }}
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'both' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
+      GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
+      GMARKET_LIST_PAGE_CONCURRENCY: "2"
       GMARKET_DETAIL_PRODUCT_CONCURRENCY: "2"
       GMARKET_DETAIL_PAGE_CONCURRENCY: "2"
       GMARKET_BLOCK_HEAVY_RESOURCES: "false"
