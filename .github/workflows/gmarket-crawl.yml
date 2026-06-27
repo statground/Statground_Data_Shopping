@@ -1,0 +1,115 @@
+name: Gmarket Shopping Crawl
+
+on:
+  workflow_dispatch:
+    inputs:
+      collect_mode:
+        description: "random_best_categories, search_keywords, or from_excel"
+        required: false
+        default: "random_best_categories"
+      total_target_products:
+        description: "Maximum products to keep in the output workbook"
+        required: false
+        default: "60"
+      random_category_count:
+        description: "Best category count for random_best_categories mode"
+        required: false
+        default: "10"
+      products_per_category:
+        description: "Product candidates per best category"
+        required: false
+        default: "10"
+      detail_source_mode:
+        description: "both, korean, or global"
+        required: false
+        default: "both"
+      output_file:
+        description: "Repository path for the generated workbook"
+        required: false
+        default: "outputs/gmarket_go_validated_parallel_detail.xlsx"
+  schedule:
+    - cron: "10 19 * * *"
+
+concurrency:
+  group: gmarket-shopping-crawl
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
+      GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
+      GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '10' }}
+      GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '10' }}
+      GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'both' }}
+      GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
+      GMARKET_DETAIL_PRODUCT_CONCURRENCY: "2"
+      GMARKET_DETAIL_PAGE_CONCURRENCY: "2"
+      GMARKET_BLOCK_HEAVY_RESOURCES: "false"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Set up Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Show runtime versions
+        run: |
+          go version
+          "${{ steps.setup-chrome.outputs.chrome-path }}" --version
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run crawler
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          mkdir -p "$(dirname "$GMARKET_OUTPUT_FILE")"
+          go run .
+
+      - name: Upload crawl workbook artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmarket-shopping-workbook
+          path: ${{ env.GMARKET_OUTPUT_FILE }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Commit workbook to repository
+        run: |
+          if [ ! -f "$GMARKET_OUTPUT_FILE" ]; then
+            echo "Expected output file was not created: $GMARKET_OUTPUT_FILE"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$GMARKET_OUTPUT_FILE"
+
+          if git diff --cached --quiet; then
+            echo "No workbook changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update Gmarket shopping crawl output"
+          git push
