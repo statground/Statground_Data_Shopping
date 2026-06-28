@@ -92,6 +92,17 @@ func NewKafkaPublisherFromEnv() (*KafkaPublisher, error) {
 	return &KafkaPublisher{Cfg: cfg}, nil
 }
 
+func PreflightKafkaFromEnv(ctx context.Context) error {
+	pub, err := NewKafkaPublisherFromEnv()
+	if err != nil {
+		return err
+	}
+	if !pub.Cfg.PreflightRequired {
+		return nil
+	}
+	return pub.Validate(ctx)
+}
+
 func (p *KafkaPublisher) Validate(ctx context.Context) error {
 	for _, broker := range p.Cfg.Brokers {
 		if isLoopbackBrokerEndpoint(broker) {
@@ -460,7 +471,7 @@ func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []stri
 		}
 		leaderEndpoint := normalizedKafkaEndpoint(leaderHost, strconv.Itoa(partition.Leader.Port))
 		if rejected[leaderEndpoint] {
-			return fmt.Errorf("%s advertises retired broker endpoint %s for topic=%s partition=%d", label, leaderEndpoint, partition.Topic, partition.ID)
+			return fmt.Errorf("%s advertises retired broker endpoint %s for topic=%s partition=%d; recreate Kafka_Platform with the current KAFKA_PUBLIC_HOST before running this workflow", label, leaderEndpoint, partition.Topic, partition.ID)
 		}
 		if len(bootstrap) > 0 && !bootstrap[leaderEndpoint] {
 			nonBootstrapLeaders++

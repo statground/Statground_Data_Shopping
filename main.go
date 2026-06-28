@@ -3175,6 +3175,14 @@ func main() {
 	fmt.Println("상세 상품 동시 처리:", DetailProductConcurrency)
 	fmt.Println("상세 페이지 동시 처리:", DetailPageConcurrency)
 
+	if ShouldPublishKafka() {
+		fmt.Println("Kafka 사전 점검 시작")
+		if err := PreflightKafkaFromEnv(context.Background()); err != nil {
+			panic(fmt.Errorf("kafka preflight failed before crawling: %w", err))
+		}
+		fmt.Println("Kafka 사전 점검 완료")
+	}
+
 	var ctx context.Context
 	var cancel context.CancelFunc
 	var err error

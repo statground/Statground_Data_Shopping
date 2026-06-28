@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/segmentio/kafka-go"
+)
 
 func TestBuildGmarketPayloadUsesProductCodeAndLatestFields(t *testing.T) {
 	CollectMode = "random_best_categories"
@@ -30,5 +35,25 @@ func TestBuildGmarketPayloadUsesProductCodeAndLatestFields(t *testing.T) {
 	}
 	if got := len(payload["description_image_urls"].([]string)); got != 2 {
 		t.Fatalf("description_image_urls len = %d", got)
+	}
+}
+
+func TestValidateKafkaAdvertisedLeadersRejectsRetiredEndpoint(t *testing.T) {
+	err := validateKafkaAdvertisedLeaders([]kafka.Partition{
+		{
+			Topic: "shopping.events",
+			ID:    11,
+			Leader: kafka.Broker{
+				Host: "180.66.240.243",
+				Port: 50004,
+			},
+		},
+	}, []string{"211.178.126.139:50004"}, []string{"180.66.240.243:50004"}, "kafka broker metadata")
+
+	if err == nil {
+		t.Fatal("expected retired advertised broker error")
+	}
+	if !strings.Contains(err.Error(), "retired broker endpoint 180.66.240.243:50004") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
