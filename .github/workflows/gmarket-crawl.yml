@@ -85,10 +85,15 @@ jobs:
       KAFKA_CLIENT_ID: statground-data-shopping-gmarket
       PRODUCER_SOURCE: github_actions
       PRODUCER_IP: "::"
-      KAFKA_WRITE_ATTEMPTS: "8"
+      KAFKA_WRITE_ATTEMPTS: "3"
       KAFKA_WRITE_BACKOFF_MIN: "1.0"
-      KAFKA_WRITE_BACKOFF_MAX: "20.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "120"
+      KAFKA_WRITE_BACKOFF_MAX: "5.0"
+      KAFKA_WRITER_MAX_ATTEMPTS: "1"
+      KAFKA_READ_TIMEOUT_SECONDS: "8.0"
+      KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
+      KAFKA_PARTITION_FALLBACK_ENABLED: "true"
+      KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
+      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "180"
       KAFKA_PREFLIGHT_REQUIRED: "true"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
@@ -254,10 +259,15 @@ jobs:
       KAFKA_CLIENT_ID: statground-data-shopping-gmarket-detail-${{ matrix.shard_index }}
       PRODUCER_SOURCE: github_actions_detail_enrich
       PRODUCER_IP: "::"
-      KAFKA_WRITE_ATTEMPTS: "8"
+      KAFKA_WRITE_ATTEMPTS: "3"
       KAFKA_WRITE_BACKOFF_MIN: "1.0"
-      KAFKA_WRITE_BACKOFF_MAX: "20.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "120"
+      KAFKA_WRITE_BACKOFF_MAX: "5.0"
+      KAFKA_WRITER_MAX_ATTEMPTS: "1"
+      KAFKA_READ_TIMEOUT_SECONDS: "8.0"
+      KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
+      KAFKA_PARTITION_FALLBACK_ENABLED: "true"
+      KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
+      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "180"
       KAFKA_PREFLIGHT_REQUIRED: "true"
       GMARKET_COLLECT_MODE: "random_best_categories"
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '240' }}

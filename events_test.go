@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,5 +94,38 @@ func TestApplyShardFilterPartitionsRowsByProductCode(t *testing.T) {
 
 	if len(seen) != len(rows) {
 		t.Fatalf("partitioned rows = %d, want %d", len(seen), len(rows))
+	}
+}
+
+func TestFixedPartitionBalancerUsesRequestedPartition(t *testing.T) {
+	balancer := fixedPartitionBalancer{partition: 7}
+	if got := balancer.Balance(kafka.Message{}, 0, 3, 7, 9); got != 7 {
+		t.Fatalf("fixed partition = %d, want 7", got)
+	}
+	if got := balancer.Balance(kafka.Message{}, 1, 2, 3); got != 1 {
+		t.Fatalf("fallback partition = %d, want first available partition", got)
+	}
+}
+
+func TestSplitIntCSVSortsAndDeduplicates(t *testing.T) {
+	got := splitIntCSV("5, 1, bad, -1, 5, 3")
+	want := []int{1, 3, 5}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("splitIntCSV[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestShouldUsePartitionFallbackForLeaderMetadataErrors(t *testing.T) {
+	err := errors.New("[6] Not Leader For Partition: metadata are likely out of date")
+	if !shouldUsePartitionFallback(err) {
+		t.Fatal("expected leader metadata error to use fixed partition fallback")
+	}
+	if shouldUsePartitionFallback(errors.New("connection reset by peer")) {
+		t.Fatal("network errors should use normal retry path")
 	}
 }

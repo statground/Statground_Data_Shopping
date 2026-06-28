@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,22 +18,28 @@ import (
 )
 
 type KafkaConfig struct {
-	IngestMode        string
-	Brokers           []string
-	Username          string
-	Password          string
-	Topic             string
-	ClientID          string
-	BatchSize         int
-	BatchTimeout      time.Duration
-	WriteAttempts     int
-	WriteBackoffMin   time.Duration
-	WriteBackoffMax   time.Duration
-	PublishTimeout    time.Duration
-	ProducerSource    string
-	ProducerIP        string
-	PreflightRequired bool
-	RejectAdvertised  []string
+	IngestMode         string
+	Brokers            []string
+	Username           string
+	Password           string
+	Topic              string
+	ClientID           string
+	BatchSize          int
+	BatchTimeout       time.Duration
+	WriterMaxAttempts  int
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	WriteAttempts      int
+	WriteBackoffMin    time.Duration
+	WriteBackoffMax    time.Duration
+	PublishTimeout     time.Duration
+	PartitionFallback  bool
+	FallbackPartitions []int
+	FallbackTimeout    time.Duration
+	ProducerSource     string
+	ProducerIP         string
+	PreflightRequired  bool
+	RejectAdvertised   []string
 }
 
 type KafkaPublisher struct {
@@ -63,22 +70,28 @@ func ShouldPublishKafka() bool {
 
 func NewKafkaPublisherFromEnv() (*KafkaPublisher, error) {
 	cfg := KafkaConfig{
-		IngestMode:        strings.ToLower(envString("INGEST_MODE", "excel")),
-		Brokers:           splitCSV(envString("KAFKA_BROKERS", "")),
-		Username:          envString("KAFKA_USERNAME", envString("KAFKA_EXTERNAL_USER", "")),
-		Password:          envString("KAFKA_PASSWORD", envString("KAFKA_EXTERNAL_PASSWORD", "")),
-		Topic:             envString("KAFKA_TOPIC", "shopping.events"),
-		ClientID:          envString("KAFKA_CLIENT_ID", "statground-data-shopping-gmarket"),
-		BatchSize:         positiveInt(envString("KAFKA_BATCH_SIZE", "100"), 100),
-		BatchTimeout:      secondsDefault(envString("KAFKA_BATCH_TIMEOUT", "1.0"), time.Second),
-		WriteAttempts:     positiveInt(envString("KAFKA_WRITE_ATTEMPTS", "8"), 8),
-		WriteBackoffMin:   secondsDefault(envString("KAFKA_WRITE_BACKOFF_MIN", envString("KAFKA_WRITE_BACKOFF_MIN_SECONDS", "1.0")), time.Second),
-		WriteBackoffMax:   secondsDefault(envString("KAFKA_WRITE_BACKOFF_MAX", envString("KAFKA_WRITE_BACKOFF_MAX_SECONDS", "20.0")), 20*time.Second),
-		PublishTimeout:    secondsDefault(envString("KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS", envString("KAFKA_PUBLISH_TIMEOUT_SECONDS", "120")), 120*time.Second),
-		ProducerSource:    envString("PRODUCER_SOURCE", "github_actions"),
-		ProducerIP:        envString("PRODUCER_IP", "::"),
-		PreflightRequired: envBool("KAFKA_PREFLIGHT_REQUIRED", true),
-		RejectAdvertised:  splitCSV(envString("KAFKA_REJECT_ADVERTISED_BROKERS", "")),
+		IngestMode:         strings.ToLower(envString("INGEST_MODE", "excel")),
+		Brokers:            splitCSV(envString("KAFKA_BROKERS", "")),
+		Username:           envString("KAFKA_USERNAME", envString("KAFKA_EXTERNAL_USER", "")),
+		Password:           envString("KAFKA_PASSWORD", envString("KAFKA_EXTERNAL_PASSWORD", "")),
+		Topic:              envString("KAFKA_TOPIC", "shopping.events"),
+		ClientID:           envString("KAFKA_CLIENT_ID", "statground-data-shopping-gmarket"),
+		BatchSize:          positiveInt(envString("KAFKA_BATCH_SIZE", "100"), 100),
+		BatchTimeout:       secondsDefault(envString("KAFKA_BATCH_TIMEOUT", "1.0"), time.Second),
+		WriterMaxAttempts:  positiveInt(envString("KAFKA_WRITER_MAX_ATTEMPTS", "1"), 1),
+		ReadTimeout:        secondsDefault(envString("KAFKA_READ_TIMEOUT_SECONDS", "8.0"), 8*time.Second),
+		WriteTimeout:       secondsDefault(envString("KAFKA_WRITE_TIMEOUT_SECONDS", "8.0"), 8*time.Second),
+		WriteAttempts:      positiveInt(envString("KAFKA_WRITE_ATTEMPTS", "8"), 8),
+		WriteBackoffMin:    secondsDefault(envString("KAFKA_WRITE_BACKOFF_MIN", envString("KAFKA_WRITE_BACKOFF_MIN_SECONDS", "1.0")), time.Second),
+		WriteBackoffMax:    secondsDefault(envString("KAFKA_WRITE_BACKOFF_MAX", envString("KAFKA_WRITE_BACKOFF_MAX_SECONDS", "20.0")), 20*time.Second),
+		PublishTimeout:     secondsDefault(envString("KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS", envString("KAFKA_PUBLISH_TIMEOUT_SECONDS", "120")), 120*time.Second),
+		PartitionFallback:  envBool("KAFKA_PARTITION_FALLBACK_ENABLED", true),
+		FallbackPartitions: splitIntCSV(envString("KAFKA_FALLBACK_PARTITIONS", "")),
+		FallbackTimeout:    secondsDefault(envString("KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS", "8.0"), 8*time.Second),
+		ProducerSource:     envString("PRODUCER_SOURCE", "github_actions"),
+		ProducerIP:         envString("PRODUCER_IP", "::"),
+		PreflightRequired:  envBool("KAFKA_PREFLIGHT_REQUIRED", true),
+		RejectAdvertised:   splitCSV(envString("KAFKA_REJECT_ADVERTISED_BROKERS", "")),
 	}
 	if cfg.WriteBackoffMax < cfg.WriteBackoffMin {
 		cfg.WriteBackoffMax = cfg.WriteBackoffMin
@@ -210,6 +223,13 @@ func (p *KafkaPublisher) writeMessagesWithRetry(ctx context.Context, messages []
 		if len(failed) == 0 || !retryable || attempt == p.Cfg.WriteAttempts {
 			return err
 		}
+		if p.Cfg.PartitionFallback && shouldUsePartitionFallback(err) {
+			if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err))
+			}
+		}
 		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, p.Cfg.WriteAttempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
 		if err := sleep(ctx, kafkaBackoffDuration(attempt, p.Cfg.WriteBackoffMin, p.Cfg.WriteBackoffMax)); err != nil {
 			return fmt.Errorf("kafka retry wait stopped: %w; last_error=%s", err, shortKafkaError(lastErr))
@@ -220,10 +240,17 @@ func (p *KafkaPublisher) writeMessagesWithRetry(ctx context.Context, messages []
 }
 
 func (p *KafkaPublisher) writer() *kafka.Writer {
+	return p.writerWithBalancer(&kafka.Hash{})
+}
+
+func (p *KafkaPublisher) writerWithBalancer(balancer kafka.Balancer) *kafka.Writer {
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(p.Cfg.Brokers...),
 		Topic:                  p.Cfg.Topic,
-		Balancer:               &kafka.Hash{},
+		Balancer:               balancer,
+		MaxAttempts:            p.Cfg.WriterMaxAttempts,
+		ReadTimeout:            p.Cfg.ReadTimeout,
+		WriteTimeout:           p.Cfg.WriteTimeout,
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: false,
 		BatchSize:              p.Cfg.BatchSize,
@@ -238,6 +265,102 @@ func (p *KafkaPublisher) writer() *kafka.Writer {
 	}
 	w.Transport = transport
 	return w
+}
+
+func (p *KafkaPublisher) writeMessagesToWritablePartition(ctx context.Context, messages []kafka.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	partitions, err := p.fallbackPartitionIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(partitions) == 0 {
+		return fmt.Errorf("kafka partition fallback found zero partitions for topic=%s", p.Cfg.Topic)
+	}
+
+	pending := messages
+	var lastErr error
+	for _, partition := range partitions {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, p.Cfg.FallbackTimeout)
+		w := p.writerWithBalancer(fixedPartitionBalancer{partition: partition})
+		err := w.WriteMessages(attemptCtx, pending...)
+		_ = w.Close()
+		cancel()
+		if err == nil {
+			fmt.Printf("[kafka] fixed partition fallback succeeded partition=%d messages=%d\n", partition, len(pending))
+			return nil
+		}
+
+		lastErr = err
+		failed, retryable := retryableFailedMessages(pending, err)
+		if len(failed) == 0 {
+			return nil
+		}
+		pending = failed
+		fmt.Printf("[kafka] fixed partition fallback failed partition=%d failed_messages=%d reason=%s error=%s\n", partition, len(pending), kafkaRetryReason(err), shortKafkaError(err))
+		if !retryable {
+			return err
+		}
+	}
+	return fmt.Errorf("kafka fixed partition fallback exhausted partitions=%v failed_messages=%d last_error=%s", partitions, len(pending), shortKafkaError(lastErr))
+}
+
+func (p *KafkaPublisher) fallbackPartitionIDs(ctx context.Context) ([]int, error) {
+	if len(p.Cfg.FallbackPartitions) > 0 {
+		out := append([]int(nil), p.Cfg.FallbackPartitions...)
+		sort.Ints(out)
+		return uniqueInts(out), nil
+	}
+
+	dialer := &kafka.Dialer{
+		ClientID: p.Cfg.ClientID,
+		Timeout:  10 * time.Second,
+		DialFunc: kafkaAdvertisedBrokerDialFunc(p.Cfg.Brokers, 10*time.Second),
+	}
+	if strings.TrimSpace(p.Cfg.Username) != "" || strings.TrimSpace(p.Cfg.Password) != "" {
+		dialer.SASLMechanism = plain.Mechanism{Username: p.Cfg.Username, Password: p.Cfg.Password}
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(probeCtx, "tcp", p.Cfg.Brokers[0])
+	if err != nil {
+		return nil, fmt.Errorf("kafka partition fallback failed to connect to bootstrap broker: %w", err)
+	}
+	defer conn.Close()
+
+	partitions, err := conn.ReadPartitions(p.Cfg.Topic)
+	if err != nil {
+		return nil, fmt.Errorf("kafka partition fallback failed to read metadata for topic %q: %w", p.Cfg.Topic, err)
+	}
+	out := make([]int, 0, len(partitions))
+	for _, partition := range partitions {
+		if partition.Topic == p.Cfg.Topic {
+			out = append(out, partition.ID)
+		}
+	}
+	sort.Ints(out)
+	return uniqueInts(out), nil
+}
+
+type fixedPartitionBalancer struct {
+	partition int
+}
+
+func (b fixedPartitionBalancer) Balance(_ kafka.Message, partitions ...int) int {
+	for _, partition := range partitions {
+		if partition == b.partition {
+			return partition
+		}
+	}
+	if len(partitions) > 0 {
+		return partitions[0]
+	}
+	return b.partition
 }
 
 func eventKey(ev KafkaEvent) string {
@@ -282,6 +405,40 @@ func splitCSV(raw string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func splitIntCSV(raw string) []int {
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return uniqueInts(out)
+}
+
+func uniqueInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := values[:0]
+	var last int
+	for i, value := range values {
+		if i > 0 && value == last {
+			continue
+		}
+		out = append(out, value)
+		last = value
 	}
 	return out
 }
@@ -398,6 +555,11 @@ func kafkaRetryReason(err error) string {
 	default:
 		return "temporary-kafka-error"
 	}
+}
+
+func shouldUsePartitionFallback(err error) bool {
+	reason := kafkaRetryReason(err)
+	return reason == "leader-metadata-stale" || reason == "leader-not-available"
 }
 
 func shortKafkaError(err error) string {
