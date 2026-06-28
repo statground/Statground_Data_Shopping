@@ -102,8 +102,11 @@ var DescriptionImageMax = 30
 var SaveDebugHTML = false
 var AllowEmptyResult = false
 var CollectDetailsEnabled = true
+var SaveExcelEnabled = true
+var IngestMode = "excel"
 
 func ApplyEnvConfig() {
+	setStringFromEnv("INGEST_MODE", &IngestMode)
 	setStringFromEnv("GMARKET_COLLECT_MODE", &CollectMode)
 	setStringFromEnv("GMARKET_INPUT_FILE", &InputFile)
 	setStringFromEnv("GMARKET_OUTPUT_FILE", &OutputFile)
@@ -130,6 +133,7 @@ func ApplyEnvConfig() {
 	setBoolFromEnv("GMARKET_SAVE_DEBUG_HTML", &SaveDebugHTML)
 	setBoolFromEnv("GMARKET_ALLOW_EMPTY_RESULT", &AllowEmptyResult)
 	setBoolFromEnv("GMARKET_COLLECT_DETAILS", &CollectDetailsEnabled)
+	setBoolFromEnv("GMARKET_SAVE_EXCEL", &SaveExcelEnabled)
 
 	if v := strings.TrimSpace(os.Getenv("GMARKET_SEARCH_KEYWORDS")); v != "" {
 		parts := strings.Split(v, ",")
@@ -3126,6 +3130,26 @@ func SaveExcel(resultRows []Row, listRows []Row, detailRows []Row) error {
 	return f.SaveAs(OutputFile)
 }
 
+func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detailRows []Row) {
+	if ShouldPublishKafka() {
+		if err := PublishGmarketRowsFromEnv(resultRows); err != nil {
+			panic(err)
+		}
+	}
+
+	if SaveExcelEnabled {
+		if err := SaveExcel(resultRows, listRows, detailRows); err != nil {
+			panic(err)
+		}
+		fmt.Println("저장 완료:", OutputFile)
+	} else {
+		fmt.Println("엑셀 저장 건너뜀: GMARKET_SAVE_EXCEL=false")
+	}
+
+	fmt.Println("최종 행 수:", len(resultRows))
+	fmt.Println("소요 시간:", time.Since(start))
+}
+
 // ============================================================
 // 14. main
 // ============================================================
@@ -3143,6 +3167,7 @@ func main() {
 
 	fmt.Println("Gmarket Go 크롤러 시작")
 	fmt.Println("수집 모드:", CollectMode)
+	fmt.Println("저장/적재 모드:", IngestMode)
 	fmt.Println("목록 수집 방식:", ListSourceMode)
 	fmt.Println("상세 수집 모드:", DetailSourceMode)
 	fmt.Println("목표 상품 수:", TotalTargetProducts)
@@ -3180,13 +3205,7 @@ func main() {
 	if !CollectDetailsEnabled {
 		fmt.Println("\n상세 수집을 건너뜁니다: GMARKET_COLLECT_DETAILS=false")
 		resultRows := MergeRows(listRows, nil)
-		err = SaveExcel(resultRows, listRows, nil)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Println("저장 완료:", OutputFile)
-		fmt.Println("최종 행 수:", len(resultRows))
-		fmt.Println("소요 시간:", time.Since(start))
+		FinalizeCollection(start, resultRows, listRows, nil)
 		return
 	}
 
@@ -3207,14 +3226,7 @@ func main() {
 
 	resultRows := MergeRows(listRows, detailRows)
 
-	err = SaveExcel(resultRows, listRows, detailRows)
-	if err != nil {
-		panic(err)
-	}
-
 	fmt.Println("\n====================================")
-	fmt.Println("저장 완료:", OutputFile)
-	fmt.Println("최종 행 수:", len(resultRows))
-	fmt.Println("소요 시간:", time.Since(start))
+	FinalizeCollection(start, resultRows, listRows, detailRows)
 	fmt.Println("====================================")
 }

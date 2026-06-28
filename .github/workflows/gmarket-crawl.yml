@@ -24,18 +24,26 @@ on:
         required: false
         default: "both"
       output_file:
-        description: "Repository path for the generated workbook"
+        description: "Artifact path for the generated workbook when save_excel=true"
         required: false
         default: "outputs/gmarket_go_validated_parallel_detail.xlsx"
+      collect_details:
+        description: "Collect Korean/global product detail pages"
+        required: false
+        default: "true"
+      save_excel:
+        description: "Also save/upload workbook artifact"
+        required: false
+        default: "false"
   schedule:
-    - cron: "10 19 * * *"
+    - cron: "10 */4 * * *"
 
 concurrency:
   group: gmarket-shopping-crawl
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   crawl:
@@ -43,12 +51,25 @@ jobs:
     timeout-minutes: 180
 
     env:
+      INGEST_MODE: kafka
+      KAFKA_TOPIC: shopping.events
+      KAFKA_CLIENT_ID: statground-data-shopping-gmarket
+      PRODUCER_SOURCE: github_actions
+      PRODUCER_IP: "::"
+      KAFKA_WRITE_ATTEMPTS: "8"
+      KAFKA_WRITE_BACKOFF_MIN: "1.0"
+      KAFKA_WRITE_BACKOFF_MAX: "20.0"
+      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "120"
+      KAFKA_PREFLIGHT_REQUIRED: "true"
+      KAFKA_REJECT_ADVERTISED_BROKERS: "180.66.240.243:50004"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '10' }}
       GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '10' }}
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'both' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
+      GMARKET_COLLECT_DETAILS: ${{ github.event.inputs.collect_details || 'true' }}
+      GMARKET_SAVE_EXCEL: ${{ github.event.inputs.save_excel || 'false' }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "2"
       GMARKET_DETAIL_PRODUCT_CONCURRENCY: "2"
@@ -57,14 +78,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version-file: go.mod
           cache: true
 
       - name: Set up Chrome
@@ -79,17 +98,67 @@ jobs:
           go version
           "${{ steps.setup-chrome.outputs.chrome-path }}" --version
 
-      - name: Download Go modules
-        run: go mod download
+      - name: Prepare crawl run UUID
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import uuid
+          print(f"GMARKET_RUN_UUID={uuid.uuid4()}")
+          PY
+
+      - name: Validate required repository secrets
+        env:
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: |
+          test -n "$KAFKA_BROKERS" || { echo "KAFKA_BROKERS secret is required"; exit 1; }
+          test -n "$KAFKA_USERNAME" || { echo "KAFKA_USERNAME secret is required"; exit 1; }
+          test -n "$KAFKA_PASSWORD" || { echo "KAFKA_PASSWORD secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_HOST secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PORT" || { echo "CLICKHOUSE_PORT secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
+          case ",$KAFKA_BROKERS," in
+            *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
+              echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
+              exit 1
+              ;;
+            *,180.66.240.243:50004,*)
+              echo "KAFKA_BROKERS still contains a retired Kafka endpoint; use the current public bootstrap endpoint"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve Go modules and checksums
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          go mod download all
+          go mod verify
+
+      - name: Run tests
+        run: go test ./...
 
       - name: Run crawler
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
         run: |
-          mkdir -p "$(dirname "$GMARKET_OUTPUT_FILE")"
+          if [ "$GMARKET_SAVE_EXCEL" = "true" ]; then
+            mkdir -p "$(dirname "$GMARKET_OUTPUT_FILE")"
+          fi
           go run .
 
       - name: Upload crawl workbook artifact
+        if: env.GMARKET_SAVE_EXCEL == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: gmarket-shopping-workbook
@@ -97,21 +166,31 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Commit workbook to repository
+      - name: Wait for ClickHouse ingestion
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
         run: |
-          if [ ! -f "$GMARKET_OUTPUT_FILE" ]; then
-            echo "Expected output file was not created: $GMARKET_OUTPUT_FILE"
-            exit 1
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- "$GMARKET_OUTPUT_FILE"
-
-          if git diff --cached --quiet; then
-            echo "No workbook changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Update Gmarket shopping crawl output"
-          git push
+          path="${CLICKHOUSE_HTTP_URL_PATH:-/}"
+          case "$path" in
+            /*) ;;
+            *) path="/$path" ;;
+          esac
+          url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
+          query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
+          for attempt in $(seq 1 24); do
+            count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$query" || true)"
+            count="$(printf '%s' "$count" | tr -d '[:space:]')"
+            if [ "${count:-0}" -gt 0 ] 2>/dev/null; then
+              echo "ClickHouse ingestion confirmed rows=$count run_uuid=$GMARKET_RUN_UUID"
+              exit 0
+            fi
+            echo "Waiting for ClickHouse ingestion attempt=$attempt rows=${count:-0}"
+            sleep 10
+          done
+          echo "ClickHouse ingestion was not visible for run_uuid=$GMARKET_RUN_UUID within the wait window"
+          exit 1
