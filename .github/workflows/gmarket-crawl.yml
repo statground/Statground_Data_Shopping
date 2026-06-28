@@ -90,7 +90,6 @@ jobs:
       KAFKA_WRITE_BACKOFF_MAX: "20.0"
       KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "120"
       KAFKA_PREFLIGHT_REQUIRED: "true"
-      KAFKA_REJECT_ADVERTISED_BROKERS: "180.66.240.243:50004"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '10' }}
@@ -260,7 +259,6 @@ jobs:
       KAFKA_WRITE_BACKOFF_MAX: "20.0"
       KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "120"
       KAFKA_PREFLIGHT_REQUIRED: "true"
-      KAFKA_REJECT_ADVERTISED_BROKERS: "180.66.240.243:50004"
       GMARKET_COLLECT_MODE: "random_best_categories"
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '240' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '12' }}

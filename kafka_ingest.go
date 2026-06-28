@@ -479,7 +479,7 @@ func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []stri
 		}
 	}
 	if nonBootstrapLeaders > 0 {
-		fmt.Printf("[kafka] %s metadata has %d non-bootstrap advertised broker entries across %d topic(s); producer will dial via bootstrap rewrite\n", label, nonBootstrapLeaders, len(topics))
+		fmt.Printf("[kafka] %s has %d non-bootstrap advertised broker entries across %d topic(s); producer will dial via bootstrap rewrite\n", label, nonBootstrapLeaders, len(topics))
 	}
 	return nil
 }
