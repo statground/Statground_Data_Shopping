@@ -3262,7 +3262,9 @@ func main() {
 	if ShouldPublishKafka() {
 		fmt.Println("Kafka 사전 점검 시작")
 		if err := PreflightKafkaFromEnv(context.Background()); err != nil {
-			panic(fmt.Errorf("kafka preflight failed before crawling: %w", err))
+			fmt.Println("Kafka 사전 점검 실패:", err)
+			fmt.Println("조치 필요: Docker 권한이 있는 host에서 Statground_SQL/docker-compose/50004_Kafka_Platform/recreate_with_public_host.sh를 실행해 Kafka advertised listener를 현재 public host로 맞춰야 합니다.")
+			os.Exit(1)
 		}
 		fmt.Println("Kafka 사전 점검 완료")
 	}
