@@ -72,6 +72,8 @@ func BuildGmarketPayload(row Row, runUUID string, collectedAt time.Time) map[str
 		"collect_mode":            CollectMode,
 		"list_source_mode":        ListSourceMode,
 		"detail_source_mode":      DetailSourceMode,
+		"shard_count":             ShardCount,
+		"shard_index":             ShardIndex,
 		"source_category":         CleanText(row["수집카테고리"]),
 		"group_code":              CleanText(row["groupCode"]),
 		"search_keyword":          CleanText(row["검색어"]),

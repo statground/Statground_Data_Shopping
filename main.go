@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	htmlpkg "html"
 	"math/rand"
 	"net/http"
@@ -56,6 +57,8 @@ var SearchPageSize = 60
 
 // 0이면 전부 상세 수집
 var DetailLimit = 0
+var ShardCount = 1
+var ShardIndex = 0
 
 var DetailSourceMode = "both"
 
@@ -124,6 +127,8 @@ func ApplyEnvConfig() {
 	setIntFromEnv("GMARKET_SEARCH_PAGES_PER_KEYWORD", &SearchPagesPerKeyword)
 	setIntFromEnv("GMARKET_SEARCH_PAGE_SIZE", &SearchPageSize)
 	setIntFromEnv("GMARKET_DETAIL_LIMIT", &DetailLimit)
+	setIntFromEnv("GMARKET_SHARD_COUNT", &ShardCount)
+	setIntFromEnv("GMARKET_SHARD_INDEX", &ShardIndex)
 	setIntFromEnv("GMARKET_DETAIL_PRODUCT_CONCURRENCY", &DetailProductConcurrency)
 	setIntFromEnv("GMARKET_DETAIL_PAGE_CONCURRENCY", &DetailPageConcurrency)
 	setIntFromEnv("GMARKET_LIST_SCROLL_COUNT", &ListScrollCount)
@@ -161,6 +166,13 @@ func ApplyEnvConfig() {
 		if len(keywords) > 0 {
 			SearchKeywords = keywords
 		}
+	}
+
+	if ShardCount <= 0 {
+		panic(fmt.Sprintf("GMARKET_SHARD_COUNT must be positive: %d", ShardCount))
+	}
+	if ShardIndex < 0 || ShardIndex >= ShardCount {
+		panic(fmt.Sprintf("GMARKET_SHARD_INDEX must be between 0 and GMARKET_SHARD_COUNT-1: index=%d count=%d", ShardIndex, ShardCount))
 	}
 }
 
@@ -2656,6 +2668,35 @@ func CollectListProducts(ctx context.Context) []Row {
 	return unique
 }
 
+func ApplyShardFilter(rows []Row) []Row {
+	if ShardCount <= 1 {
+		return rows
+	}
+	filtered := make([]Row, 0, len(rows)/ShardCount+1)
+	for _, row := range rows {
+		code := CleanText(row["상품코드"])
+		if code == "" {
+			continue
+		}
+		if ProductShard(code, ShardCount) == ShardIndex {
+			row["shard_count"] = strconv.Itoa(ShardCount)
+			row["shard_index"] = strconv.Itoa(ShardIndex)
+			filtered = append(filtered, row)
+		}
+	}
+	fmt.Printf("분산 shard 적용: index=%d count=%d before=%d after=%d\n", ShardIndex, ShardCount, len(rows), len(filtered))
+	return filtered
+}
+
+func ProductShard(productCode string, shardCount int) int {
+	if shardCount <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(productCode))
+	return int(h.Sum32() % uint32(shardCount))
+}
+
 func NeedsBrowserForList() bool {
 	return ListSourceMode == "browser" || ListSourceMode == "auto"
 }
@@ -3213,6 +3254,7 @@ func main() {
 	fmt.Println("목록 수집 방식:", ListSourceMode)
 	fmt.Println("상세 수집 모드:", DetailSourceMode)
 	fmt.Println("목표 상품 수:", TotalTargetProducts)
+	fmt.Printf("분산 shard: %d/%d\n", ShardIndex, ShardCount)
 	fmt.Println("목록 페이지 동시 처리:", ListPageConcurrency)
 	fmt.Println("상세 상품 동시 처리:", DetailProductConcurrency)
 	fmt.Println("상세 페이지 동시 처리:", DetailPageConcurrency)
@@ -3237,14 +3279,20 @@ func main() {
 		defer cancel()
 	}
 
-	listRows := CollectListProducts(ctx)
+	listRowsAll := CollectListProducts(ctx)
+	listRows := ApplyShardFilter(listRowsAll)
 
 	fmt.Println("\n====================================")
 	fmt.Println("목록 수집 완료")
-	fmt.Println("목록 상품 수:", len(listRows))
+	fmt.Println("전체 목록 상품 수:", len(listRowsAll))
+	fmt.Println("현재 shard 상품 수:", len(listRows))
 	fmt.Println("====================================")
 
 	if len(listRows) == 0 {
+		if len(listRowsAll) > 0 && ShardCount > 1 {
+			fmt.Println("현재 shard에 배정된 상품이 없습니다. 작업을 정상 종료합니다.")
+			return
+		}
 		fmt.Println("목록 상품이 수집되지 않았습니다.")
 		fmt.Println("CollectMode를 search_keywords로 바꿔 다시 시도해보세요.")
 		if !AllowEmptyResult {
