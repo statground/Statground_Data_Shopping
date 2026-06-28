@@ -89,6 +89,11 @@ var DetailRetryCount = 3
 var DetailRetryBaseSleep = 5 * time.Second
 var DetailValidationWait = 35 * time.Second
 var DetailStartJitter = 1500 * time.Millisecond
+var PostNavigationSleep = 2500 * time.Millisecond
+var ValidationPollSleep = 3000 * time.Millisecond
+var DetailClickSleep = 900 * time.Millisecond
+var DetailScrollSleep = 800 * time.Millisecond
+var DetailFinalSleep = 1500 * time.Millisecond
 
 // 차단이 잦으면 false 권장.
 // true로 하면 이미지/폰트/미디어를 차단해 빨라지지만, 일부 상세 이미지 URL 수집률이 낮아질 수 있음.
@@ -127,6 +132,16 @@ func ApplyEnvConfig() {
 	setIntFromEnv("GMARKET_LIST_PAGE_CONCURRENCY", &ListPageConcurrency)
 
 	setInt64FromEnv("GMARKET_RANDOM_SEED", &RandomSeed)
+	setDurationSecondsFromEnv("GMARKET_PAGE_TIMEOUT_SECONDS", &PageTimeout)
+	setDurationSecondsFromEnv("GMARKET_DETAIL_VALIDATION_WAIT_SECONDS", &DetailValidationWait)
+	setDurationSecondsFromEnv("GMARKET_DETAIL_RETRY_BASE_SLEEP_SECONDS", &DetailRetryBaseSleep)
+	setDurationMillisFromEnv("GMARKET_PAGE_DELAY_MS", &PageDelay)
+	setDurationMillisFromEnv("GMARKET_DETAIL_START_JITTER_MS", &DetailStartJitter)
+	setDurationMillisFromEnv("GMARKET_POST_NAVIGATION_SLEEP_MS", &PostNavigationSleep)
+	setDurationMillisFromEnv("GMARKET_VALIDATION_POLL_SLEEP_MS", &ValidationPollSleep)
+	setDurationMillisFromEnv("GMARKET_DETAIL_CLICK_SLEEP_MS", &DetailClickSleep)
+	setDurationMillisFromEnv("GMARKET_DETAIL_SCROLL_SLEEP_MS", &DetailScrollSleep)
+	setDurationMillisFromEnv("GMARKET_DETAIL_FINAL_SLEEP_MS", &DetailFinalSleep)
 
 	setBoolFromEnv("GMARKET_HEADLESS", &Headless)
 	setBoolFromEnv("GMARKET_BLOCK_HEAVY_RESOURCES", &BlockHeavyResources)
@@ -172,6 +187,26 @@ func setInt64FromEnv(name string, target *int64) {
 			panic(fmt.Sprintf("%s must be an integer: %q", name, v))
 		}
 		*target = parsed
+	}
+}
+
+func setDurationSecondsFromEnv(name string, target *time.Duration) {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil || parsed < 0 {
+			panic(fmt.Sprintf("%s must be a non-negative number of seconds: %q", name, v))
+		}
+		*target = time.Duration(parsed * float64(time.Second))
+	}
+}
+
+func setDurationMillisFromEnv(name string, target *time.Duration) {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil || parsed < 0 {
+			panic(fmt.Sprintf("%s must be a non-negative number of milliseconds: %q", name, v))
+		}
+		*target = time.Duration(parsed * float64(time.Millisecond))
 	}
 }
 
@@ -827,7 +862,7 @@ func FetchRenderedHTMLValidated(browserCtx context.Context, targetURL string, sc
 			lastError = err.Error()
 		}
 
-		_ = chromedp.Run(ctx, chromedp.Sleep(2500*time.Millisecond))
+		_ = chromedp.Run(ctx, chromedp.Sleep(PostNavigationSleep))
 
 		validationStart := time.Now()
 		pageLooksOK := false
@@ -864,7 +899,7 @@ func FetchRenderedHTMLValidated(browserCtx context.Context, targetURL string, sc
 				break
 			}
 
-			_ = chromedp.Run(ctx, chromedp.Sleep(3000*time.Millisecond))
+			_ = chromedp.Run(ctx, chromedp.Sleep(ValidationPollSleep))
 		}
 
 		if platform != "list" && !pageLooksOK {
@@ -892,7 +927,7 @@ func FetchRenderedHTMLValidated(browserCtx context.Context, targetURL string, sc
 			var clicked bool
 			_ = chromedp.Run(ctx,
 				chromedp.Evaluate(clickJS, &clicked),
-				chromedp.Sleep(900*time.Millisecond),
+				chromedp.Sleep(DetailClickSleep),
 			)
 		}
 
@@ -900,11 +935,11 @@ func FetchRenderedHTMLValidated(browserCtx context.Context, targetURL string, sc
 			var ok bool
 			_ = chromedp.Run(ctx,
 				chromedp.Evaluate(`window.scrollBy(0, 2500); true;`, &ok),
-				chromedp.Sleep(800*time.Millisecond),
+				chromedp.Sleep(DetailScrollSleep),
 			)
 		}
 
-		_ = chromedp.Run(ctx, chromedp.Sleep(1500*time.Millisecond))
+		_ = chromedp.Run(ctx, chromedp.Sleep(DetailFinalSleep))
 
 		var htmlCombined string
 
@@ -963,6 +998,13 @@ func FetchRenderedHTMLValidated(browserCtx context.Context, targetURL string, sc
 	}
 
 	return "", finalURL, lastError
+}
+
+func SleepRandomUpTo(maxDelay time.Duration) {
+	if maxDelay <= 0 {
+		return
+	}
+	time.Sleep(time.Duration(rand.Int63n(int64(maxDelay))))
 }
 
 // ============================================================
@@ -2626,7 +2668,7 @@ func FetchAndParseKoreanDetail(ctx context.Context, productCode string, domestic
 	result := Row{}
 
 	pageSem <- struct{}{}
-	time.Sleep(time.Duration(rand.Int63n(int64(DetailStartJitter))))
+	SleepRandomUpTo(DetailStartJitter)
 
 	htmlStr, finalURL, errMsg := FetchRenderedHTMLValidated(
 		ctx,
@@ -2678,7 +2720,7 @@ func FetchAndParseGlobalDetail(ctx context.Context, productCode string, globalUR
 	result := Row{}
 
 	pageSem <- struct{}{}
-	time.Sleep(time.Duration(rand.Int63n(int64(DetailStartJitter))))
+	SleepRandomUpTo(DetailStartJitter)
 
 	htmlStr, finalURL, errMsg := FetchRenderedHTMLValidated(
 		ctx,

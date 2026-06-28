@@ -8,7 +8,7 @@ on:
         required: false
         default: "random_best_categories"
       total_target_products:
-        description: "Maximum products to keep in the output workbook"
+        description: "Maximum products to publish"
         required: false
         default: "60"
       random_category_count:
@@ -22,7 +22,11 @@ on:
       detail_source_mode:
         description: "both, korean, or global"
         required: false
-        default: "both"
+        default: "korean"
+      detail_limit:
+        description: "Maximum products for detail enrichment when collect_details=true; 0 means all"
+        required: false
+        default: "20"
       output_file:
         description: "Artifact path for the generated workbook when save_excel=true"
         required: false
@@ -30,7 +34,7 @@ on:
       collect_details:
         description: "Collect Korean/global product detail pages"
         required: false
-        default: "true"
+        default: "false"
       save_excel:
         description: "Also save/upload workbook artifact"
         required: false
@@ -48,7 +52,7 @@ permissions:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 75
 
     env:
       INGEST_MODE: kafka
@@ -66,15 +70,27 @@ jobs:
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '10' }}
       GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '10' }}
-      GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'both' }}
+      GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'korean' }}
+      GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit || '20' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
-      GMARKET_COLLECT_DETAILS: ${{ github.event.inputs.collect_details || 'true' }}
+      GMARKET_COLLECT_DETAILS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.collect_details || 'false' }}
       GMARKET_SAVE_EXCEL: ${{ github.event.inputs.save_excel || 'false' }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "2"
-      GMARKET_DETAIL_PRODUCT_CONCURRENCY: "2"
-      GMARKET_DETAIL_PAGE_CONCURRENCY: "2"
-      GMARKET_BLOCK_HEAVY_RESOURCES: "false"
+      GMARKET_DETAIL_PRODUCT_CONCURRENCY: "3"
+      GMARKET_DETAIL_PAGE_CONCURRENCY: "3"
+      GMARKET_DETAIL_RETRY_COUNT: "2"
+      GMARKET_DETAIL_SCROLL_COUNT: "4"
+      GMARKET_PAGE_TIMEOUT_SECONDS: "45"
+      GMARKET_DETAIL_VALIDATION_WAIT_SECONDS: "12"
+      GMARKET_DETAIL_RETRY_BASE_SLEEP_SECONDS: "2"
+      GMARKET_DETAIL_START_JITTER_MS: "300"
+      GMARKET_POST_NAVIGATION_SLEEP_MS: "1200"
+      GMARKET_VALIDATION_POLL_SLEEP_MS: "1500"
+      GMARKET_DETAIL_CLICK_SLEEP_MS: "450"
+      GMARKET_DETAIL_SCROLL_SLEEP_MS: "350"
+      GMARKET_DETAIL_FINAL_SLEEP_MS: "700"
+      GMARKET_BLOCK_HEAVY_RESOURCES: "true"
 
     steps:
       - name: Check out repository
