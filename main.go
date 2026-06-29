@@ -2882,7 +2882,7 @@ func CollectOneProductDetail(ctx context.Context, row Row, productSem chan struc
 	return detail
 }
 
-func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) []Row {
+func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) ([]Row, []Row, error) {
 	workRows := listRows
 
 	if DetailLimit > 0 && DetailLimit < len(workRows) {
@@ -2901,6 +2901,7 @@ func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row)
 	var wg sync.WaitGroup
 	var publishMu sync.Mutex
 	var publishErr error
+	publishFailedRows := []Row{}
 
 	for _, row := range workRows {
 		rowCopy := row
@@ -2916,7 +2917,12 @@ func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row)
 				if len(merged) > 0 {
 					publishMu.Lock()
 					if publishErr == nil {
-						publishErr = onDetailReady(merged[0])
+						if err := onDetailReady(merged[0]); err != nil {
+							publishErr = err
+							publishFailedRows = append(publishFailedRows, merged[0])
+						}
+					} else {
+						publishFailedRows = append(publishFailedRows, merged[0])
 					}
 					publishMu.Unlock()
 				}
@@ -2942,11 +2948,7 @@ func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row)
 	for row := range resultCh {
 		detailRows = append(detailRows, row)
 	}
-	if publishErr != nil {
-		panic(publishErr)
-	}
-
-	return detailRows
+	return detailRows, publishFailedRows, publishErr
 }
 
 // ============================================================
@@ -3352,12 +3354,14 @@ func RunGmarketCollection(rootCtx context.Context) {
 		defer cancel()
 	}
 
+	var streamPublisher *GmarketRowPublisher
 	var streamDetailPublish func(Row) error
 	if ShouldPublishKafka() {
 		publisher, err := NewGmarketRowPublisherFromEnv()
 		if err != nil {
 			panic(err)
 		}
+		streamPublisher = publisher
 		var publishMu sync.Mutex
 		streamDetailPublish = func(row Row) error {
 			publishMu.Lock()
@@ -3367,7 +3371,7 @@ func RunGmarketCollection(rootCtx context.Context) {
 		fmt.Println("Gmarket 상세 완료 행 즉시 Kafka publish 활성화")
 	}
 
-	detailRows := CollectDetails(ctx, listRows, streamDetailPublish)
+	detailRows, streamFailedRows, streamPublishErr := CollectDetails(ctx, listRows, streamDetailPublish)
 
 	fmt.Println("\n====================================")
 	fmt.Println("상세 수집 완료")
@@ -3375,6 +3379,18 @@ func RunGmarketCollection(rootCtx context.Context) {
 	fmt.Println("====================================")
 
 	resultRows := MergeRows(listRows, detailRows)
+	if streamPublishErr != nil {
+		fmt.Printf("[kafka] Gmarket streaming publish failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortKafkaError(streamPublishErr))
+		if streamPublisher == nil {
+			panic(streamPublishErr)
+		}
+		if len(streamFailedRows) > 0 {
+			if err := streamPublisher.Publish(streamFailedRows); err != nil {
+				panic(err)
+			}
+		}
+		fmt.Printf("[kafka] Gmarket streaming publish recovery succeeded failed_rows=%d\n", len(streamFailedRows))
+	}
 
 	fmt.Println("\n====================================")
 	FinalizeCollection(start, resultRows, listRows, detailRows, streamDetailPublish == nil)

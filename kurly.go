@@ -121,6 +121,7 @@ func RunKurlyCollection(ctx context.Context) {
 	}
 
 	var detailRows []Row
+	var streamPublisher *KurlyRowPublisher
 	var streamDetailPublish func(Row) error
 	if KurlyCollectDetailsEnabled {
 		if ShouldPublishKafka() {
@@ -128,6 +129,7 @@ func RunKurlyCollection(ctx context.Context) {
 			if err != nil {
 				panic(err)
 			}
+			streamPublisher = publisher
 			var publishMu sync.Mutex
 			streamDetailPublish = func(row Row) error {
 				publishMu.Lock()
@@ -136,11 +138,25 @@ func RunKurlyCollection(ctx context.Context) {
 			}
 			fmt.Println("Kurly 상세 완료 행 즉시 Kafka publish 활성화")
 		}
-		detailRows = KurlyCollectDetails(ctx, listRows, streamDetailPublish)
+		var streamFailedRows []Row
+		var streamPublishErr error
+		detailRows, streamFailedRows, streamPublishErr = KurlyCollectDetails(ctx, listRows, streamDetailPublish)
 		fmt.Println("\n====================================")
 		fmt.Println("Kurly 상세 수집 완료")
 		fmt.Println("상세 수집 상품 수:", len(detailRows))
 		fmt.Println("====================================")
+		if streamPublishErr != nil {
+			fmt.Printf("[kafka] Kurly streaming publish failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortKafkaError(streamPublishErr))
+			if streamPublisher == nil {
+				panic(streamPublishErr)
+			}
+			if len(streamFailedRows) > 0 {
+				if err := streamPublisher.Publish(streamFailedRows); err != nil {
+					panic(err)
+				}
+			}
+			fmt.Printf("[kafka] Kurly streaming publish recovery succeeded failed_rows=%d\n", len(streamFailedRows))
+		}
 	} else {
 		fmt.Println("Kurly 상세 수집을 건너뜁니다: KURLY_COLLECT_DETAILS=false")
 	}
@@ -387,7 +403,7 @@ func KurlyExtractProductRowsFromSearchJSON(data any, keyword string, pageNo stri
 	return rows
 }
 
-func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) []Row {
+func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) ([]Row, []Row, error) {
 	workRows := listRows
 	if KurlyDetailLimit > 0 && KurlyDetailLimit < len(workRows) {
 		workRows = workRows[:KurlyDetailLimit]
@@ -399,6 +415,7 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func
 	var wg sync.WaitGroup
 	var publishMu sync.Mutex
 	var publishErr error
+	publishFailedRows := []Row{}
 
 	for _, row := range workRows {
 		rowCopy := row
@@ -416,7 +433,12 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func
 				if len(merged) > 0 {
 					publishMu.Lock()
 					if publishErr == nil {
-						publishErr = onDetailReady(merged[0])
+						if err := onDetailReady(merged[0]); err != nil {
+							publishErr = err
+							publishFailedRows = append(publishFailedRows, merged[0])
+						}
+					} else {
+						publishFailedRows = append(publishFailedRows, merged[0])
 					}
 					publishMu.Unlock()
 				}
@@ -434,10 +456,7 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func
 	for row := range resultCh {
 		details = append(details, row)
 	}
-	if publishErr != nil {
-		panic(publishErr)
-	}
-	return details
+	return details, publishFailedRows, publishErr
 }
 
 func KurlyFetchOneDetail(ctx context.Context, row Row) Row {

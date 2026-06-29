@@ -1,15 +1,35 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math/rand"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
+
+type fakeKafkaWriter struct {
+	err    error
+	writes *[][]string
+}
+
+func (w *fakeKafkaWriter) WriteMessages(_ context.Context, messages ...kafka.Message) error {
+	keys := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		keys = append(keys, string(msg.Key))
+	}
+	*w.writes = append(*w.writes, keys)
+	return w.err
+}
+
+func (w *fakeKafkaWriter) Close() error {
+	return nil
+}
 
 func TestBuildGmarketPayloadUsesProductCodeAndLatestFields(t *testing.T) {
 	CollectMode = "random_best_categories"
@@ -285,5 +305,42 @@ func TestShouldUsePartitionFallbackForLeaderMetadataErrors(t *testing.T) {
 	}
 	if shouldUsePartitionFallback(errors.New("connection reset by peer")) {
 		t.Fatal("network errors should use normal retry path")
+	}
+}
+
+func TestWriteMessagesWithRetryRetriesWriterDeadline(t *testing.T) {
+	pub := KafkaPublisher{Cfg: KafkaConfig{
+		WriteAttempts:   2,
+		WriteBackoffMin: time.Millisecond,
+		WriteBackoffMax: time.Millisecond,
+	}}
+	messages := []kafka.Message{{Key: []byte("a"), Value: []byte("1")}}
+	errs := []error{kafka.WriteErrors{context.DeadlineExceeded}, nil}
+	writes := make([][]string, 0, len(errs))
+	attempt := 0
+	sleeps := 0
+
+	err := pub.writeMessagesWithRetry(context.Background(), messages, func() kafkaMessageWriter {
+		if attempt >= len(errs) {
+			t.Fatalf("unexpected writer attempt %d", attempt+1)
+		}
+		err := errs[attempt]
+		attempt++
+		return &fakeKafkaWriter{err: err, writes: &writes}
+	}, func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("writeMessagesWithRetry returned error: %v", err)
+	}
+	if attempt != 2 {
+		t.Fatalf("attempt count = %d, want 2", attempt)
+	}
+	if sleeps != 1 {
+		t.Fatalf("sleep count = %d, want 1", sleeps)
+	}
+	if len(writes) != 2 || len(writes[0]) != 1 || writes[0][0] != "a" || len(writes[1]) != 1 || writes[1][0] != "a" {
+		t.Fatalf("writes mismatch: %#v", writes)
 	}
 }

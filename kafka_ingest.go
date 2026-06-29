@@ -219,6 +219,9 @@ func (p *KafkaPublisher) writeMessagesWithRetry(ctx context.Context, messages []
 		}
 
 		lastErr = err
+		if ctx.Err() != nil {
+			return err
+		}
 		failed, retryable := retryableFailedMessages(pending, err)
 		if len(failed) == 0 || !retryable || attempt == p.Cfg.WriteAttempts {
 			return err
@@ -485,7 +488,7 @@ func retryableKafkaWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var writeErrs kafka.WriteErrors
