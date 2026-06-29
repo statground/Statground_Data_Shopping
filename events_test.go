@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"strconv"
@@ -38,6 +39,79 @@ func TestBuildGmarketPayloadUsesProductCodeAndLatestFields(t *testing.T) {
 	}
 	if got := len(payload["description_image_urls"].([]string)); got != 2 {
 		t.Fatalf("description_image_urls len = %d", got)
+	}
+}
+
+func TestBuildKurlyPayloadUsesKurlyFields(t *testing.T) {
+	KurlyCollectMode = "search_api_keywords"
+
+	payload := BuildKurlyPayload(Row{
+		"상품코드":          "10012345",
+		"상품명":           "목록 이름",
+		"상세_상품명":        "상세 이름",
+		"할인가_목록":        "7900",
+		"판매가_목록":        "9900",
+		"상세_배송":         "샛별배송",
+		"상세_판매자":        "컬리",
+		"상세설명이미지_URL목록": "https://img.example/a.jpg | https://img.example/b.jpg",
+		"상세_수집성공":       "true",
+	}, "018f0000-0000-7000-8000-000000000000", NowKST())
+
+	if payload["provider"] != "kurly" {
+		t.Fatalf("provider = %v", payload["provider"])
+	}
+	if payload["product_code"] != "10012345" {
+		t.Fatalf("product_code = %v", payload["product_code"])
+	}
+	if payload["product_name"] != "상세 이름" {
+		t.Fatalf("product_name = %v", payload["product_name"])
+	}
+	if payload["list_price_krw"] != uint64(7900) {
+		t.Fatalf("list_price_krw = %v", payload["list_price_krw"])
+	}
+	if payload["list_original_price_krw"] != uint64(9900) {
+		t.Fatalf("list_original_price_krw = %v", payload["list_original_price_krw"])
+	}
+	if payload["detail_collect_success"] != true {
+		t.Fatalf("detail_collect_success = %v", payload["detail_collect_success"])
+	}
+	if got := len(payload["description_image_urls"].([]string)); got != 2 {
+		t.Fatalf("description_image_urls len = %d", got)
+	}
+}
+
+func TestKurlyExtractProductRowsFromSearchJSON(t *testing.T) {
+	data := map[string]any{
+		"data": []any{
+			map[string]any{
+				"no":                "10012345",
+				"name":              "친환경 사과",
+				"discountedPrice":   json.Number("7900"),
+				"salesPrice":        json.Number("9900"),
+				"thumbnailImageUrl": "//img.example/apple.jpg",
+				"brandName":         "농장",
+				"deliveryTypeNames": []any{"샛별배송"},
+			},
+			map[string]any{
+				"no":   "category-1",
+				"name": "카테고리",
+			},
+		},
+	}
+
+	rows := KurlyExtractProductRowsFromSearchJSON(data, "사과", "1", "market", "https://api.kurly.com/search")
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1: %#v", len(rows), rows)
+	}
+	row := rows[0]
+	if row["상품코드"] != "10012345" || row["상품명"] != "친환경 사과" {
+		t.Fatalf("unexpected row identity: %#v", row)
+	}
+	if row["목록_판매가_KRW"] != "7900" || row["목록_정가_KRW"] != "9900" {
+		t.Fatalf("unexpected price fields: %#v", row)
+	}
+	if row["이미지URL_목록"] != "https://img.example/apple.jpg" {
+		t.Fatalf("unexpected image URL: %s", row["이미지URL_목록"])
 	}
 }
 

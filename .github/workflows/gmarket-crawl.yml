@@ -1,4 +1,4 @@
-name: Gmarket Shopping Crawl
+name: Shopping Crawl
 
 on:
   workflow_dispatch:
@@ -90,7 +90,7 @@ jobs:
     env:
       INGEST_MODE: kafka
       KAFKA_TOPIC: shopping.events
-      KAFKA_CLIENT_ID: statground-data-shopping-gmarket
+      KAFKA_CLIENT_ID: statground-data-shopping-crawl
       PRODUCER_SOURCE: github_actions
       PRODUCER_IP: "::"
       KAFKA_WRITE_ATTEMPTS: "3"
@@ -129,6 +129,17 @@ jobs:
       GMARKET_DETAIL_SCROLL_SLEEP_MS: "350"
       GMARKET_DETAIL_FINAL_SLEEP_MS: "700"
       GMARKET_BLOCK_HEAVY_RESOURCES: "true"
+      KURLY_COLLECT_ENABLED: "true"
+      KURLY_COLLECT_MODE: "search_api_keywords"
+      KURLY_TOTAL_TARGET_PRODUCTS: "120"
+      KURLY_RANDOM_KEYWORD_COUNT: "30"
+      KURLY_SEARCH_PAGES_PER_KEYWORD: "2"
+      KURLY_PRODUCTS_PER_KEYWORD: "8"
+      KURLY_COLLECT_DETAILS: "true"
+      KURLY_DETAIL_LIMIT: "0"
+      KURLY_DETAIL_CONCURRENCY: "8"
+      KURLY_REQUEST_SLEEP_MIN_MS: "200"
+      KURLY_REQUEST_SLEEP_MAX_MS: "800"
 
     steps:
       - name: Check out repository
@@ -157,6 +168,7 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_ENV"
           import uuid
           print(f"GMARKET_RUN_UUID={uuid.uuid4()}")
+          print(f"KURLY_RUN_UUID={uuid.uuid4()}")
           PY
 
       - name: Validate required repository secrets
@@ -235,18 +247,21 @@ jobs:
             *) path="/$path" ;;
           esac
           url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
-          query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
+          gmarket_query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
+          kurly_query="SELECT count() FROM Data_Shopping_Raw.kurly_product_raw WHERE collect_run_uuid = toUUID('${KURLY_RUN_UUID}') FORMAT TabSeparatedRaw"
           for attempt in $(seq 1 24); do
-            count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$query" || true)"
-            count="$(printf '%s' "$count" | tr -d '[:space:]')"
-            if [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-              echo "ClickHouse ingestion confirmed rows=$count run_uuid=$GMARKET_RUN_UUID"
+            gmarket_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$gmarket_query" || true)"
+            kurly_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$kurly_query" || true)"
+            gmarket_count="$(printf '%s' "$gmarket_count" | tr -d '[:space:]')"
+            kurly_count="$(printf '%s' "$kurly_count" | tr -d '[:space:]')"
+            if [ "${gmarket_count:-0}" -gt 0 ] 2>/dev/null && [ "${kurly_count:-0}" -gt 0 ] 2>/dev/null; then
+              echo "ClickHouse ingestion confirmed gmarket_rows=$gmarket_count kurly_rows=$kurly_count gmarket_run_uuid=$GMARKET_RUN_UUID kurly_run_uuid=$KURLY_RUN_UUID"
               exit 0
             fi
-            echo "Waiting for ClickHouse ingestion attempt=$attempt rows=${count:-0}"
+            echo "Waiting for ClickHouse ingestion attempt=$attempt gmarket_rows=${gmarket_count:-0} kurly_rows=${kurly_count:-0}"
             sleep 10
           done
-          echo "ClickHouse ingestion was not visible for run_uuid=$GMARKET_RUN_UUID within the wait window"
+          echo "ClickHouse ingestion was not visible for gmarket_run_uuid=$GMARKET_RUN_UUID and kurly_run_uuid=$KURLY_RUN_UUID within the wait window"
           exit 1
 
   detail_enrich:

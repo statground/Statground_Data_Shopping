@@ -110,6 +110,7 @@ var DescriptionImageMax = 30
 
 var SaveDebugHTML = false
 var AllowEmptyResult = false
+var GmarketCollectEnabled = true
 var CollectDetailsEnabled = true
 var SaveExcelEnabled = true
 var IngestMode = "excel"
@@ -154,6 +155,7 @@ func ApplyEnvConfig() {
 	setBoolFromEnv("GMARKET_BLOCK_HEAVY_RESOURCES", &BlockHeavyResources)
 	setBoolFromEnv("GMARKET_SAVE_DEBUG_HTML", &SaveDebugHTML)
 	setBoolFromEnv("GMARKET_ALLOW_EMPTY_RESULT", &AllowEmptyResult)
+	setBoolFromEnv("GMARKET_COLLECT_ENABLED", &GmarketCollectEnabled)
 	setBoolFromEnv("GMARKET_COLLECT_DETAILS", &CollectDetailsEnabled)
 	setBoolFromEnv("GMARKET_SAVE_EXCEL", &SaveExcelEnabled)
 
@@ -3267,6 +3269,7 @@ func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detai
 
 func main() {
 	ApplyEnvConfig()
+	ApplyKurlyEnvConfig()
 
 	if RandomSeed == 0 {
 		rand.Seed(time.Now().UnixNano())
@@ -3295,6 +3298,14 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Kafka 사전 점검 완료")
+	}
+
+	if !GmarketCollectEnabled {
+		fmt.Println("Gmarket 수집을 건너뜁니다: GMARKET_COLLECT_ENABLED=false")
+		if KurlyCollectEnabled {
+			RunKurlyCollection(context.Background())
+		}
+		return
 	}
 
 	var ctx context.Context
@@ -3357,4 +3368,8 @@ func main() {
 	fmt.Println("\n====================================")
 	FinalizeCollection(start, resultRows, listRows, detailRows)
 	fmt.Println("====================================")
+
+	if KurlyCollectEnabled {
+		RunKurlyCollection(context.Background())
+	}
 }
