@@ -280,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     concurrency:
-      group: gmarket-shopping-crawl-detail
+      group: gmarket-shopping-crawl-detail-${{ matrix.shard_index }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
