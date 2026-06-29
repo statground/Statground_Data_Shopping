@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"math/rand"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,6 +38,26 @@ func TestBuildGmarketPayloadUsesProductCodeAndLatestFields(t *testing.T) {
 	}
 	if got := len(payload["description_image_urls"].([]string)); got != 2 {
 		t.Fatalf("description_image_urls len = %d", got)
+	}
+}
+
+func TestSelectedSearchKeywordsHonorsLimitAndAllMode(t *testing.T) {
+	oldKeywords := SearchKeywords
+	defer func() {
+		SearchKeywords = oldKeywords
+	}()
+
+	SearchKeywords = []string{"노트북", "생수", "키보드", "샴푸"}
+	rand.Seed(1)
+
+	limited := selectedSearchKeywords(2)
+	if len(limited) != 2 {
+		t.Fatalf("limited keyword count = %d, want 2: %#v", len(limited), limited)
+	}
+
+	all := selectedSearchKeywords(0)
+	if len(all) != len(SearchKeywords) {
+		t.Fatalf("all keyword count = %d, want %d: %#v", len(all), len(SearchKeywords), all)
 	}
 }
 

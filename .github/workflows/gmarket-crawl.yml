@@ -16,29 +16,37 @@ on:
         required: false
         default: "random_best_categories"
       total_target_products:
-        description: "Maximum list snapshot products to publish"
+        description: "Maximum list snapshot products to publish; 0 means keep all collected rows"
         required: false
-        default: "60"
+        default: "0"
       random_category_count:
-        description: "Best category count for crawl mode"
+        description: "Best category count for crawl mode; 0 means all default categories"
         required: false
-        default: "10"
+        default: "0"
       products_per_category:
         description: "Product candidates per best category for crawl mode"
         required: false
-        default: "10"
+        default: "60"
+      random_keyword_count:
+        description: "Random keyword count to supplement category first-page collection"
+        required: false
+        default: "5"
       detail_total_target_products:
-        description: "Detail enrichment candidate products before shard filtering"
+        description: "Detail enrichment candidate products before shard filtering; 0 means keep all collected rows"
         required: false
-        default: "240"
+        default: "0"
       detail_random_category_count:
-        description: "Best category count for detail enrichment candidates"
+        description: "Best category count for detail enrichment candidates; 0 means all default categories"
         required: false
-        default: "12"
+        default: "0"
       detail_products_per_category:
         description: "Product candidates per best category for detail enrichment"
         required: false
-        default: "20"
+        default: "60"
+      detail_random_keyword_count:
+        description: "Random keyword count for detail enrichment candidate supplementation"
+        required: false
+        default: "5"
       detail_source_mode:
         description: "both, korean, or global"
         required: false
@@ -46,11 +54,11 @@ on:
       detail_limit:
         description: "Crawl-mode detail limit when collect_details=true; 0 means all"
         required: false
-        default: "20"
+        default: "0"
       detail_limit_per_shard:
         description: "Detail enrichment products per shard; 0 means all shard rows"
         required: false
-        default: "20"
+        default: "0"
       output_file:
         description: "Artifact path for the generated workbook when save_excel=true"
         required: false
@@ -58,7 +66,7 @@ on:
       collect_details:
         description: "Collect details in crawl mode"
         required: false
-        default: "false"
+        default: "true"
       save_excel:
         description: "Also save/upload workbook artifact"
         required: false
@@ -74,7 +82,7 @@ jobs:
   crawl:
     if: ${{ (github.event_name == 'schedule' && github.event.schedule == '10 */4 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 300
     concurrency:
       group: gmarket-shopping-crawl-list
       cancel-in-progress: true
@@ -93,16 +101,17 @@ jobs:
       KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
       KAFKA_PARTITION_FALLBACK_ENABLED: "true"
       KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "180"
+      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "600"
       KAFKA_PREFLIGHT_REQUIRED: "true"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
-      GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '60' }}
-      GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '10' }}
-      GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '10' }}
+      GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '0' }}
+      GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '0' }}
+      GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '60' }}
+      GMARKET_RANDOM_KEYWORD_COUNT: ${{ github.event.inputs.random_keyword_count || '5' }}
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'korean' }}
-      GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit || '20' }}
+      GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit || '0' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
-      GMARKET_COLLECT_DETAILS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.collect_details || 'false' }}
+      GMARKET_COLLECT_DETAILS: ${{ github.event.inputs.collect_details || 'true' }}
       GMARKET_SAVE_EXCEL: ${{ github.event.inputs.save_excel || 'false' }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "2"
@@ -243,7 +252,7 @@ jobs:
   detail_enrich:
     if: ${{ (github.event_name == 'schedule' && github.event.schedule == '40 19 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'detail_enrich') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     concurrency:
       group: gmarket-shopping-crawl-detail
       cancel-in-progress: true
@@ -267,18 +276,19 @@ jobs:
       KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
       KAFKA_PARTITION_FALLBACK_ENABLED: "true"
       KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "180"
+      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "600"
       KAFKA_PREFLIGHT_REQUIRED: "true"
       GMARKET_COLLECT_MODE: "random_best_categories"
-      GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '240' }}
-      GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '12' }}
-      GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.detail_products_per_category || '20' }}
+      GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '0' }}
+      GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '0' }}
+      GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.detail_products_per_category || '60' }}
+      GMARKET_RANDOM_KEYWORD_COUNT: ${{ github.event.inputs.detail_random_keyword_count || '5' }}
       GMARKET_RANDOM_SEED: ${{ github.run_id }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "1"
       GMARKET_COLLECT_DETAILS: "true"
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'korean' }}
-      GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit_per_shard || '20' }}
+      GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit_per_shard || '0' }}
       GMARKET_SHARD_COUNT: "4"
       GMARKET_SHARD_INDEX: ${{ matrix.shard_index }}
       GMARKET_OUTPUT_FILE: outputs/gmarket_detail_shard_${{ matrix.shard_index }}.xlsx

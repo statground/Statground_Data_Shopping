@@ -37,10 +37,11 @@ var CollectMode = "random_best_categories"
 var InputFile = "gmarket_products_global_detail_improved.xlsx"
 var OutputFile = "outputs/gmarket_go_validated_parallel_detail.xlsx"
 
-var TotalTargetProducts = 60
+var TotalTargetProducts = 0
 
-var RandomCategoryCount = 10
-var ProductsPerCategory = 10
+var RandomCategoryCount = 0
+var ProductsPerCategory = 60
+var RandomKeywordCount = 5
 
 // 0이면 매번 랜덤, 숫자를 넣으면 같은 결과 재현
 var RandomSeed int64 = 0
@@ -124,6 +125,7 @@ func ApplyEnvConfig() {
 	setIntFromEnv("GMARKET_TOTAL_TARGET_PRODUCTS", &TotalTargetProducts)
 	setIntFromEnv("GMARKET_RANDOM_CATEGORY_COUNT", &RandomCategoryCount)
 	setIntFromEnv("GMARKET_PRODUCTS_PER_CATEGORY", &ProductsPerCategory)
+	setIntFromEnv("GMARKET_RANDOM_KEYWORD_COUNT", &RandomKeywordCount)
 	setIntFromEnv("GMARKET_SEARCH_PAGES_PER_KEYWORD", &SearchPagesPerKeyword)
 	setIntFromEnv("GMARKET_SEARCH_PAGE_SIZE", &SearchPageSize)
 	setIntFromEnv("GMARKET_DETAIL_LIMIT", &DetailLimit)
@@ -2423,15 +2425,25 @@ func CollectFromBestCategories(ctx context.Context) []Row {
 	return allRows
 }
 
-func CollectFromSearchKeywords(ctx context.Context) []Row {
-	allRows := []Row{}
-
+func selectedSearchKeywords(limit int) []string {
 	keywords := make([]string, len(SearchKeywords))
 	copy(keywords, SearchKeywords)
 
 	rand.Shuffle(len(keywords), func(i, j int) {
 		keywords[i], keywords[j] = keywords[j], keywords[i]
 	})
+
+	if limit > 0 && limit < len(keywords) {
+		keywords = keywords[:limit]
+	}
+
+	return keywords
+}
+
+func CollectFromSearchKeywords(ctx context.Context, keywordLimit int) []Row {
+	allRows := []Row{}
+
+	keywords := selectedSearchKeywords(keywordLimit)
 
 	if ListSourceMode == "gsearch_ajax" {
 		jobs := []ListJob{}
@@ -2486,7 +2498,7 @@ func CollectFromSearchKeywords(ctx context.Context) []Row {
 
 			allRows = append(allRows, rows...)
 
-			if len(allRows) >= TotalTargetProducts*2 {
+			if TotalTargetProducts > 0 && len(allRows) >= TotalTargetProducts*2 {
 				return allRows
 			}
 
@@ -2625,14 +2637,14 @@ func CollectListProducts(ctx context.Context) []Row {
 	case "random_best_categories":
 		rows = CollectFromBestCategories(ctx)
 
-		if len(rows) < TotalTargetProducts {
-			fmt.Println("\n베스트 카테고리 수집량이 부족해서 검색어 방식으로 보충합니다.")
-			extra := CollectFromSearchKeywords(ctx)
+		if RandomKeywordCount > 0 {
+			fmt.Printf("\n카테고리 대표 상품 수집 뒤 랜덤 검색어 %d개를 보강 수집합니다.\n", RandomKeywordCount)
+			extra := CollectFromSearchKeywords(ctx, RandomKeywordCount)
 			rows = append(rows, extra...)
 		}
 
 	case "search_keywords":
-		rows = CollectFromSearchKeywords(ctx)
+		rows = CollectFromSearchKeywords(ctx, 0)
 
 	case "from_excel":
 		rows = CollectFromExcel()
@@ -3157,6 +3169,22 @@ func SaveExcel(resultRows []Row, listRows []Row, detailRows []Row) error {
 		{
 			"항목": "목록 수집 방식",
 			"값":  ListSourceMode,
+		},
+		{
+			"항목": "목표 상품 수",
+			"값":  strconv.Itoa(TotalTargetProducts),
+		},
+		{
+			"항목": "대표 카테고리 수",
+			"값":  strconv.Itoa(RandomCategoryCount),
+		},
+		{
+			"항목": "카테고리당 상품 수",
+			"값":  strconv.Itoa(ProductsPerCategory),
+		},
+		{
+			"항목": "랜덤 보강 키워드 수",
+			"값":  strconv.Itoa(RandomKeywordCount),
 		},
 		{
 			"항목": "상세 수집 모드",
