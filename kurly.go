@@ -22,10 +22,10 @@ import (
 
 var KurlyCollectEnabled = false
 var KurlyCollectMode = "search_api_keywords"
-var KurlyTotalTargetProducts = 100
-var KurlyRandomKeywordCount = 30
-var KurlySearchPagesPerKeyword = 2
-var KurlyProductsPerKeyword = 8
+var KurlyTotalTargetProducts = 1200
+var KurlyRandomKeywordCount = 120
+var KurlySearchPagesPerKeyword = 3
+var KurlyProductsPerKeyword = 16
 var KurlyDetailLimit = 0
 var KurlyDetailConcurrency = 8
 var KurlyCollectDetailsEnabled = true

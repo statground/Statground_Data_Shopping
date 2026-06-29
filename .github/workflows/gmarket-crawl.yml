@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "crawl for 4-hour list snapshot, detail_enrich for matrix detail enrichment"
+        description: "crawl for 6-hour list snapshot, detail_enrich for matrix detail enrichment"
         required: false
         default: "crawl"
         type: choice
@@ -72,7 +72,7 @@ on:
         required: false
         default: "false"
   schedule:
-    - cron: "10 */4 * * *"
+    - cron: "10 */6 * * *"
     - cron: "40 19 * * *"
 
 permissions:
@@ -80,7 +80,7 @@ permissions:
 
 jobs:
   crawl:
-    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '10 */4 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl') }}
+    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     concurrency:
@@ -131,10 +131,10 @@ jobs:
       GMARKET_BLOCK_HEAVY_RESOURCES: "true"
       KURLY_COLLECT_ENABLED: "true"
       KURLY_COLLECT_MODE: "search_api_keywords"
-      KURLY_TOTAL_TARGET_PRODUCTS: "120"
-      KURLY_RANDOM_KEYWORD_COUNT: "30"
-      KURLY_SEARCH_PAGES_PER_KEYWORD: "2"
-      KURLY_PRODUCTS_PER_KEYWORD: "8"
+      KURLY_TOTAL_TARGET_PRODUCTS: "1200"
+      KURLY_RANDOM_KEYWORD_COUNT: "120"
+      KURLY_SEARCH_PAGES_PER_KEYWORD: "3"
+      KURLY_PRODUCTS_PER_KEYWORD: "16"
       KURLY_COLLECT_DETAILS: "true"
       KURLY_DETAIL_LIMIT: "0"
       KURLY_DETAIL_CONCURRENCY: "8"

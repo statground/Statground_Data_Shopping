@@ -115,6 +115,69 @@ func TestKurlyExtractProductRowsFromSearchJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizeInsightCategoryUsesStatgroundCanonicalBuckets(t *testing.T) {
+	cases := []struct {
+		name          string
+		provider      string
+		raw           string
+		categoryPath  string
+		searchKeyword string
+		productName   string
+		want          string
+	}{
+		{
+			name:        "gmarket food raw category",
+			provider:    "gmarket",
+			raw:         "가공식품",
+			productName: "컵라면 12개입",
+			want:        "식품",
+		},
+		{
+			name:          "kurly fresh keyword",
+			provider:      "kurly",
+			searchKeyword: "양배추",
+			productName:   "국산 양배추 슬라이스",
+			want:          "식품",
+		},
+		{
+			name:        "mixed gmarket hobby pet category with pet product",
+			provider:    "gmarket",
+			raw:         "취미/문구/펫",
+			productName: "강아지 사료 2kg",
+			want:        "유아/반려",
+		},
+		{
+			name:        "mixed gmarket hobby pet category with stationery product",
+			provider:    "gmarket",
+			raw:         "취미/문구/펫",
+			productName: "노트 필기구 세트",
+			want:        "도서/취미/문구",
+		},
+		{
+			name:        "gmarket coupon category",
+			provider:    "gmarket",
+			raw:         "e쿠폰",
+			productName: "커피 교환권",
+			want:        "여행/e쿠폰",
+		},
+		{
+			name:        "gmarket sports health prefers sports bucket",
+			provider:    "gmarket",
+			raw:         "스포츠/건강",
+			productName: "등산 보호대",
+			want:        "스포츠/레저",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeInsightCategory(tc.provider, tc.raw, tc.categoryPath, tc.searchKeyword, tc.productName)
+			if got != tc.want {
+				t.Fatalf("normalizeInsightCategory() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSelectedSearchKeywordsHonorsLimitAndAllMode(t *testing.T) {
 	oldKeywords := SearchKeywords
 	defer func() {

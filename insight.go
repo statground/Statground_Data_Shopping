@@ -1166,21 +1166,33 @@ var insightStopwords = map[string]struct{}{
 
 func normalizeInsightCategory(provider, raw, categoryPath, searchKeyword, productName string) string {
 	raw = cleanInsightText(raw)
-	if provider == "gmarket" && raw != "" {
-		return raw
-	}
-	key := strings.ToLower(raw + " " + categoryPath + " " + searchKeyword + " " + productName)
+	rawContext := strings.ToLower(norm.NFKC.String(strings.Join([]string{raw, categoryPath, searchKeyword}, " ")))
+	productContext := strings.ToLower(norm.NFKC.String(productName))
 	switch {
-	case containsAny(key, "채소", "과일", "정육", "닭고기", "돼지고기", "소고기", "수산", "생선", "새우", "계란", "샐러드"):
-		return "신선식품"
-	case containsAny(key, "쌀", "잡곡", "간편식", "밀키트", "반찬", "김치", "라면", "떡볶이", "만두", "피자", "냉동", "과자", "초콜릿", "커피", "주스", "생수", "베이커리", "우유", "요거트", "치즈", "버터"):
-		return "가공식품"
-	case containsAny(key, "세제", "휴지", "칫솔", "주방", "생활"):
+	case containsAny(productContext, "도서", "책", "문구", "노트", "펜", "연필", "필기구", "음반", "앨범", "취미", "피규어", "퍼즐"):
+		return "도서/취미/문구"
+	case containsAny(rawContext, "유아", "육아", "출산", "아기", "베이비", "키즈", "기저귀", "장난감", "강아지", "고양이", "반려", "펫", "사료", "주식") || containsAny(productContext, "유아", "육아", "출산", "아기", "베이비", "키즈", "기저귀", "장난감", "강아지", "고양이", "반려", "펫", "사료", "간식", "주식"):
+		return "유아/반려"
+	case containsAny(rawContext, "e쿠폰", "이쿠폰", "쿠폰", "기프티콘", "상품권", "교환권", "모바일쿠폰", "여행", "항공", "숙박", "호텔", "렌터카", "티켓"):
+		return "여행/e쿠폰"
+	case containsAny(rawContext, "도서", "음반", "문구", "취미") || containsAny(productContext, "도서", "책", "문구", "노트", "펜", "연필", "음반", "앨범", "취미", "피규어", "퍼즐"):
+		return "도서/취미/문구"
+	case containsAny(rawContext, "패션", "잡화", "의류", "신발", "가방", "쥬얼리", "주얼리", "시계", "모자") || containsAny(productContext, "의류", "티셔츠", "셔츠", "팬츠", "원피스", "신발", "운동화", "가방", "백팩", "모자", "양말"):
+		return "패션/잡화"
+	case containsAny(rawContext, "디지털", "가전", "컴퓨터", "모바일", "노트북", "전자", "보조배터리", "키보드", "마우스", "모니터", "충전기", "케이블", "이어폰", "헤드셋") || containsAny(productContext, "노트북", "키보드", "마우스", "모니터", "충전기", "케이블", "이어폰", "헤드셋", "보조배터리", "가전"):
+		return "디지털/가전"
+	case containsAny(rawContext, "가구", "홈", "침구", "인테리어", "수납", "조명", "책상", "테이블", "식탁", "홈패브릭") || containsAny(productContext, "침대", "소파", "책상", "의자", "수납장", "선반", "매트리스", "커튼", "러그", "이불", "베개", "테이블", "식탁", "홈패브릭"):
+		return "가구/홈"
+	case containsAny(rawContext, "스포츠", "레저", "캠핑", "골프", "등산", "낚시", "자동차", "공구", "수영") || containsAny(productContext, "운동", "스포츠", "골프", "캠핑", "등산", "자전거", "헬멧", "보호대", "낚시", "수영"):
+		return "스포츠/레저"
+	case containsAny(rawContext, "뷰티", "화장", "헬스", "건강", "미용", "립메이크업", "메이크업") || containsAny(productContext, "화장품", "선크림", "마스크팩", "샴푸", "바디워시", "스킨", "로션", "크림", "콜라겐", "비타민", "영양제", "립스틱", "립메이크업", "메이크업"):
+		return "뷰티/헬스"
+	case containsAny(productContext, "채소", "과일", "정육", "닭고기", "돼지고기", "소고기", "수산", "생선", "새우", "계란", "달걀", "샐러드", "쌀", "잡곡", "간편식", "밀키트", "반찬", "김치", "라면", "떡볶이", "만두", "피자", "냉동", "과자", "초콜릿", "커피", "차", "주스", "생수", "베이커리", "우유", "요거트", "치즈", "버터", "식품", "푸드", "고기", "음료", "양배추", "브로콜리", "파프리카", "오이", "당근", "양파", "감자", "고구마", "토마토", "사과", "배", "바나나", "포도", "귤", "딸기", "한우", "소시지", "베이컨", "하몽", "명란", "오징어", "낙지", "문어", "디저트", "코코아", "밀크티", "국"):
+		return "식품"
+	case containsAny(rawContext, "신선식품", "가공식품", "식품", "푸드", "채소", "과일", "정육", "수산", "계란", "달걀", "쌀", "간편식", "밀키트", "반찬", "김치", "라면", "냉동", "과자", "커피", "음료", "생수", "베이커리", "우유", "양배추", "브로콜리", "파프리카", "오이", "당근", "양파", "감자", "고구마", "토마토", "사과", "바나나", "소시지", "베이컨", "하몽", "명란", "오징어", "낙지", "문어", "디저트", "코코아", "밀크티", "기타 차", "치즈", "국", "신선하게 받아보는", "돼지고기", "양고기"):
+		return "식품"
+	case containsAny(rawContext, "생활", "주방", "생필품", "세제", "휴지", "청소", "욕실", "세탁", "수건") || containsAny(productContext, "세제", "휴지", "티슈", "칫솔", "치약", "수건", "주방", "프라이팬", "냄비", "그릇", "청소", "욕실", "세탁"):
 		return "생활/주방"
-	case containsAny(key, "샴푸", "바디워시", "화장품", "선크림", "마스크팩", "뷰티"):
-		return "뷰티"
-	case containsAny(key, "강아지", "고양이", "문구", "펫"):
-		return "취미/문구/펫"
 	case raw != "":
 		return raw
 	case searchKeyword != "":
