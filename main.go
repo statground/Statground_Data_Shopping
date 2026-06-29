@@ -2882,7 +2882,7 @@ func CollectOneProductDetail(ctx context.Context, row Row, productSem chan struc
 	return detail
 }
 
-func CollectDetails(ctx context.Context, listRows []Row) []Row {
+func CollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) []Row {
 	workRows := listRows
 
 	if DetailLimit > 0 && DetailLimit < len(workRows) {
@@ -2899,6 +2899,8 @@ func CollectDetails(ctx context.Context, listRows []Row) []Row {
 
 	resultCh := make(chan Row, len(workRows))
 	var wg sync.WaitGroup
+	var publishMu sync.Mutex
+	var publishErr error
 
 	for _, row := range workRows {
 		rowCopy := row
@@ -2909,6 +2911,16 @@ func CollectDetails(ctx context.Context, listRows []Row) []Row {
 
 			detail := CollectOneProductDetail(ctx, rowCopy, productSem, pageSem)
 			resultCh <- detail
+			if onDetailReady != nil {
+				merged := MergeRows([]Row{rowCopy}, []Row{detail})
+				if len(merged) > 0 {
+					publishMu.Lock()
+					if publishErr == nil {
+						publishErr = onDetailReady(merged[0])
+					}
+					publishMu.Unlock()
+				}
+			}
 
 			fmt.Printf(
 				"완료: %s / %s / 국내:%s / 글로벌:%s\n",
@@ -2929,6 +2941,9 @@ func CollectDetails(ctx context.Context, listRows []Row) []Row {
 
 	for row := range resultCh {
 		detailRows = append(detailRows, row)
+	}
+	if publishErr != nil {
+		panic(publishErr)
 	}
 
 	return detailRows
@@ -3243,11 +3258,13 @@ func SaveExcel(resultRows []Row, listRows []Row, detailRows []Row) error {
 	return f.SaveAs(OutputFile)
 }
 
-func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detailRows []Row) {
-	if ShouldPublishKafka() {
+func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detailRows []Row, publishKafka bool) {
+	if ShouldPublishKafka() && publishKafka {
 		if err := PublishGmarketRowsFromEnv(resultRows); err != nil {
 			panic(err)
 		}
+	} else if ShouldPublishKafka() {
+		fmt.Println("Kafka 최종 일괄 publish 건너뜀: 상세 수집 완료 행을 즉시 publish했습니다.")
 	}
 
 	if SaveExcelEnabled {
@@ -3267,16 +3284,8 @@ func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detai
 // 14. main
 // ============================================================
 
-func main() {
-	ApplyEnvConfig()
-	ApplyKurlyEnvConfig()
-
-	if RandomSeed == 0 {
-		rand.Seed(time.Now().UnixNano())
-	} else {
-		rand.Seed(RandomSeed)
-	}
-
+func RunGmarketCollection(rootCtx context.Context) {
+	_ = rootCtx
 	start := time.Now()
 
 	fmt.Println("Gmarket Go 크롤러 시작")
@@ -3290,21 +3299,8 @@ func main() {
 	fmt.Println("상세 상품 동시 처리:", DetailProductConcurrency)
 	fmt.Println("상세 페이지 동시 처리:", DetailPageConcurrency)
 
-	if ShouldPublishKafka() {
-		fmt.Println("Kafka 사전 점검 시작")
-		if err := PreflightKafkaFromEnv(context.Background()); err != nil {
-			fmt.Println("Kafka 사전 점검 실패:", err)
-			fmt.Println("조치 필요: Docker 권한이 있는 host에서 Statground_SQL/docker-compose/50004_Kafka_Platform/recreate_with_public_host.sh를 실행해 Kafka advertised listener를 현재 public host로 맞춰야 합니다.")
-			os.Exit(1)
-		}
-		fmt.Println("Kafka 사전 점검 완료")
-	}
-
 	if !GmarketCollectEnabled {
 		fmt.Println("Gmarket 수집을 건너뜁니다: GMARKET_COLLECT_ENABLED=false")
-		if KurlyCollectEnabled {
-			RunKurlyCollection(context.Background())
-		}
 		return
 	}
 
@@ -3344,7 +3340,7 @@ func main() {
 	if !CollectDetailsEnabled {
 		fmt.Println("\n상세 수집을 건너뜁니다: GMARKET_COLLECT_DETAILS=false")
 		resultRows := MergeRows(listRows, nil)
-		FinalizeCollection(start, resultRows, listRows, nil)
+		FinalizeCollection(start, resultRows, listRows, nil, true)
 		return
 	}
 
@@ -3356,7 +3352,22 @@ func main() {
 		defer cancel()
 	}
 
-	detailRows := CollectDetails(ctx, listRows)
+	var streamDetailPublish func(Row) error
+	if ShouldPublishKafka() {
+		publisher, err := NewGmarketRowPublisherFromEnv()
+		if err != nil {
+			panic(err)
+		}
+		var publishMu sync.Mutex
+		streamDetailPublish = func(row Row) error {
+			publishMu.Lock()
+			defer publishMu.Unlock()
+			return publisher.Publish([]Row{row})
+		}
+		fmt.Println("Gmarket 상세 완료 행 즉시 Kafka publish 활성화")
+	}
+
+	detailRows := CollectDetails(ctx, listRows, streamDetailPublish)
 
 	fmt.Println("\n====================================")
 	fmt.Println("상세 수집 완료")
@@ -3366,10 +3377,55 @@ func main() {
 	resultRows := MergeRows(listRows, detailRows)
 
 	fmt.Println("\n====================================")
-	FinalizeCollection(start, resultRows, listRows, detailRows)
+	FinalizeCollection(start, resultRows, listRows, detailRows, streamDetailPublish == nil)
 	fmt.Println("====================================")
+}
 
+func main() {
+	ApplyEnvConfig()
+	ApplyKurlyEnvConfig()
+
+	if RandomSeed == 0 {
+		rand.Seed(time.Now().UnixNano())
+	} else {
+		rand.Seed(RandomSeed)
+	}
+
+	if ShouldPublishKafka() {
+		fmt.Println("Kafka 사전 점검 시작")
+		if err := PreflightKafkaFromEnv(context.Background()); err != nil {
+			fmt.Println("Kafka 사전 점검 실패:", err)
+			fmt.Println("조치 필요: Docker 권한이 있는 host에서 Statground_SQL/docker-compose/50004_Kafka_Platform/recreate_with_public_host.sh를 실행해 Kafka advertised listener를 현재 public host로 맞춰야 합니다.")
+			os.Exit(1)
+		}
+		fmt.Println("Kafka 사전 점검 완료")
+	}
+
+	type platformRunner struct {
+		name string
+		run  func(context.Context)
+	}
+	runners := []platformRunner{}
+	if GmarketCollectEnabled {
+		runners = append(runners, platformRunner{name: "gmarket", run: RunGmarketCollection})
+	}
 	if KurlyCollectEnabled {
-		RunKurlyCollection(context.Background())
+		runners = append(runners, platformRunner{name: "kurly", run: RunKurlyCollection})
+	}
+	if len(runners) == 0 {
+		fmt.Println("활성화된 쇼핑 플랫폼 수집기가 없습니다.")
+		return
+	}
+	orderRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+	orderRand.Shuffle(len(runners), func(i, j int) {
+		runners[i], runners[j] = runners[j], runners[i]
+	})
+	order := make([]string, 0, len(runners))
+	for _, runner := range runners {
+		order = append(order, runner.name)
+	}
+	fmt.Println("쇼핑 플랫폼 실행 순서:", strings.Join(order, " -> "))
+	for _, runner := range runners {
+		runner.run(context.Background())
 	}
 }

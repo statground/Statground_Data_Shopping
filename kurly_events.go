@@ -9,15 +9,20 @@ import (
 
 const KurlyRawEventType = "shopping.kurly.raw.v1"
 
-func PublishKurlyRowsFromEnv(rows []Row) error {
+type KurlyRowPublisher struct {
+	pub     *KafkaPublisher
+	runUUID string
+}
+
+func NewKurlyRowPublisherFromEnv() (*KurlyRowPublisher, error) {
 	pub, err := NewKafkaPublisherFromEnv()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx := context.Background()
 	if pub.Cfg.PreflightRequired {
 		if err := pub.Validate(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -28,6 +33,21 @@ func PublishKurlyRowsFromEnv(rows []Row) error {
 	if runUUID == "" {
 		runUUID = NewUUIDv7()
 	}
+	return &KurlyRowPublisher{pub: pub, runUUID: runUUID}, nil
+}
+
+func PublishKurlyRowsFromEnv(rows []Row) error {
+	publisher, err := NewKurlyRowPublisherFromEnv()
+	if err != nil {
+		return err
+	}
+	return publisher.Publish(rows)
+}
+
+func (p *KurlyRowPublisher) Publish(rows []Row) error {
+	if p == nil || p.pub == nil {
+		return fmt.Errorf("kurly row publisher is not initialized")
+	}
 	now := NowKST()
 	events := make([]KafkaEvent, 0, len(rows))
 	for _, row := range rows {
@@ -35,8 +55,8 @@ func PublishKurlyRowsFromEnv(rows []Row) error {
 		if productCode == "" {
 			continue
 		}
-		payload := BuildKurlyPayload(row, runUUID, now)
-		ev, err := pub.NewEvent(KurlyRawEventType, "", FirstNonEmpty(row, []string{"상세URL", "상품URL", "상품URL_국내", "수집URL"}), FormatCHDateTime64Millis(now), payload)
+		payload := BuildKurlyPayload(row, p.runUUID, now)
+		ev, err := p.pub.NewEvent(KurlyRawEventType, "", FirstNonEmpty(row, []string{"상세URL", "상품URL", "상품URL_국내", "수집URL"}), FormatCHDateTime64Millis(now), payload)
 		if err != nil {
 			return err
 		}
@@ -46,12 +66,12 @@ func PublishKurlyRowsFromEnv(rows []Row) error {
 		return fmt.Errorf("no publishable Kurly rows with 상품코드")
 	}
 
-	publishCtx, cancel := context.WithTimeout(ctx, pub.Cfg.PublishTimeout)
+	publishCtx, cancel := context.WithTimeout(context.Background(), p.pub.Cfg.PublishTimeout)
 	defer cancel()
-	if err := pub.Publish(publishCtx, events); err != nil {
+	if err := p.pub.Publish(publishCtx, events); err != nil {
 		return err
 	}
-	fmt.Printf("[kafka] published kurly raw events=%d topic=%s run_uuid=%s\n", len(events), pub.Cfg.Topic, runUUID)
+	fmt.Printf("[kafka] published kurly raw events=%d topic=%s run_uuid=%s\n", len(events), p.pub.Cfg.Topic, p.runUUID)
 	return nil
 }
 

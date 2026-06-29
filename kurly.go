@@ -121,8 +121,22 @@ func RunKurlyCollection(ctx context.Context) {
 	}
 
 	var detailRows []Row
+	var streamDetailPublish func(Row) error
 	if KurlyCollectDetailsEnabled {
-		detailRows = KurlyCollectDetails(ctx, listRows)
+		if ShouldPublishKafka() {
+			publisher, err := NewKurlyRowPublisherFromEnv()
+			if err != nil {
+				panic(err)
+			}
+			var publishMu sync.Mutex
+			streamDetailPublish = func(row Row) error {
+				publishMu.Lock()
+				defer publishMu.Unlock()
+				return publisher.Publish([]Row{row})
+			}
+			fmt.Println("Kurly 상세 완료 행 즉시 Kafka publish 활성화")
+		}
+		detailRows = KurlyCollectDetails(ctx, listRows, streamDetailPublish)
 		fmt.Println("\n====================================")
 		fmt.Println("Kurly 상세 수집 완료")
 		fmt.Println("상세 수집 상품 수:", len(detailRows))
@@ -132,10 +146,12 @@ func RunKurlyCollection(ctx context.Context) {
 	}
 
 	resultRows := MergeRows(listRows, detailRows)
-	if ShouldPublishKafka() {
+	if ShouldPublishKafka() && streamDetailPublish == nil {
 		if err := PublishKurlyRowsFromEnv(resultRows); err != nil {
 			panic(err)
 		}
+	} else if ShouldPublishKafka() {
+		fmt.Println("Kurly Kafka 최종 일괄 publish 건너뜀: 상세 수집 완료 행을 즉시 publish했습니다.")
 	}
 
 	fmt.Println("Kurly 최종 행 수:", len(resultRows))
@@ -371,7 +387,7 @@ func KurlyExtractProductRowsFromSearchJSON(data any, keyword string, pageNo stri
 	return rows
 }
 
-func KurlyCollectDetails(ctx context.Context, listRows []Row) []Row {
+func KurlyCollectDetails(ctx context.Context, listRows []Row, onDetailReady func(Row) error) []Row {
 	workRows := listRows
 	if KurlyDetailLimit > 0 && KurlyDetailLimit < len(workRows) {
 		workRows = workRows[:KurlyDetailLimit]
@@ -381,6 +397,8 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row) []Row {
 	resultCh := make(chan Row, len(workRows))
 	sem := make(chan struct{}, KurlyDetailConcurrency)
 	var wg sync.WaitGroup
+	var publishMu sync.Mutex
+	var publishErr error
 
 	for _, row := range workRows {
 		rowCopy := row
@@ -393,6 +411,16 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row) []Row {
 			}()
 			detail := KurlyFetchOneDetail(ctx, rowCopy)
 			resultCh <- detail
+			if onDetailReady != nil {
+				merged := MergeRows([]Row{rowCopy}, []Row{detail})
+				if len(merged) > 0 {
+					publishMu.Lock()
+					if publishErr == nil {
+						publishErr = onDetailReady(merged[0])
+					}
+					publishMu.Unlock()
+				}
+			}
 			fmt.Printf("Kurly 완료: %s / %s / 상세:%s\n", detail["상품코드"], Truncate(detail["상품명_목록"], 40), detail["상세_수집성공"])
 		}()
 	}
@@ -405,6 +433,9 @@ func KurlyCollectDetails(ctx context.Context, listRows []Row) []Row {
 	details := []Row{}
 	for row := range resultCh {
 		details = append(details, row)
+	}
+	if publishErr != nil {
+		panic(publishErr)
 	}
 	return details
 }

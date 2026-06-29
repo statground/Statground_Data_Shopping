@@ -10,21 +10,41 @@ import (
 
 const GmarketRawEventType = "shopping.gmarket.raw.v1"
 
-func PublishGmarketRowsFromEnv(rows []Row) error {
+type GmarketRowPublisher struct {
+	pub     *KafkaPublisher
+	runUUID string
+}
+
+func NewGmarketRowPublisherFromEnv() (*GmarketRowPublisher, error) {
 	pub, err := NewKafkaPublisherFromEnv()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx := context.Background()
 	if pub.Cfg.PreflightRequired {
 		if err := pub.Validate(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	runUUID := envString("GMARKET_RUN_UUID", "")
 	if runUUID == "" {
 		runUUID = NewUUIDv7()
+	}
+	return &GmarketRowPublisher{pub: pub, runUUID: runUUID}, nil
+}
+
+func PublishGmarketRowsFromEnv(rows []Row) error {
+	publisher, err := NewGmarketRowPublisherFromEnv()
+	if err != nil {
+		return err
+	}
+	return publisher.Publish(rows)
+}
+
+func (p *GmarketRowPublisher) Publish(rows []Row) error {
+	if p == nil || p.pub == nil {
+		return fmt.Errorf("gmarket row publisher is not initialized")
 	}
 	now := NowKST()
 	events := make([]KafkaEvent, 0, len(rows))
@@ -33,8 +53,8 @@ func PublishGmarketRowsFromEnv(rows []Row) error {
 		if productCode == "" {
 			continue
 		}
-		payload := BuildGmarketPayload(row, runUUID, now)
-		ev, err := pub.NewEvent(GmarketRawEventType, "", bestSourceURL(row), FormatCHDateTime64Millis(now), payload)
+		payload := BuildGmarketPayload(row, p.runUUID, now)
+		ev, err := p.pub.NewEvent(GmarketRawEventType, "", bestSourceURL(row), FormatCHDateTime64Millis(now), payload)
 		if err != nil {
 			return err
 		}
@@ -44,12 +64,12 @@ func PublishGmarketRowsFromEnv(rows []Row) error {
 		return fmt.Errorf("no publishable Gmarket rows with 상품코드")
 	}
 
-	publishCtx, cancel := context.WithTimeout(ctx, pub.Cfg.PublishTimeout)
+	publishCtx, cancel := context.WithTimeout(context.Background(), p.pub.Cfg.PublishTimeout)
 	defer cancel()
-	if err := pub.Publish(publishCtx, events); err != nil {
+	if err := p.pub.Publish(publishCtx, events); err != nil {
 		return err
 	}
-	fmt.Printf("[kafka] published gmarket raw events=%d topic=%s run_uuid=%s\n", len(events), pub.Cfg.Topic, runUUID)
+	fmt.Printf("[kafka] published gmarket raw events=%d topic=%s run_uuid=%s\n", len(events), p.pub.Cfg.Topic, p.runUUID)
 	return nil
 }
 
