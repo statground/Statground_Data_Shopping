@@ -264,6 +264,17 @@ jobs:
           echo "ClickHouse ingestion was not visible for gmarket_run_uuid=$GMARKET_RUN_UUID and kurly_run_uuid=$KURLY_RUN_UUID within the wait window"
           exit 1
 
+      - name: Refresh Shopping Price Insight snapshot
+        env:
+          SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: go run .
+
   detail_enrich:
     if: ${{ (github.event_name == 'schedule' && github.event.schedule == '40 19 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'detail_enrich') }}
     runs-on: ubuntu-latest
@@ -442,3 +453,40 @@ jobs:
           done
           echo "ClickHouse detail ingestion was not visible for run_uuid=$GMARKET_RUN_UUID within the wait window"
           exit 1
+
+  refresh_insight_after_detail_enrich:
+    if: ${{ always() && needs.detail_enrich.result == 'success' && ((github.event_name == 'schedule' && github.event.schedule == '40 19 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'detail_enrich')) }}
+    needs: detail_enrich
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: shopping-price-insight-refresh
+      cancel-in-progress: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve Go modules and checksums
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          go mod download all
+          go mod verify
+
+      - name: Refresh Shopping Price Insight snapshot
+        env:
+          SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: go run .

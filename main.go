@@ -3385,6 +3385,14 @@ func main() {
 	ApplyEnvConfig()
 	ApplyKurlyEnvConfig()
 
+	if envBool("SHOPPING_ANALYSIS_REFRESH_ONLY", false) {
+		if err := RunShoppingInsightRefreshFromEnv(context.Background()); err != nil {
+			fmt.Println("Shopping Price Insight snapshot refresh failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if RandomSeed == 0 {
 		rand.Seed(time.Now().UnixNano())
 	} else {
