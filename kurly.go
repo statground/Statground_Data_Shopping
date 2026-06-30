@@ -121,11 +121,11 @@ func RunKurlyCollection(ctx context.Context) {
 	}
 
 	var detailRows []Row
-	var streamPublisher *KurlyRowPublisher
+	var streamPublisher RowPublisher
 	var streamDetailPublish func(Row) error
 	if KurlyCollectDetailsEnabled {
-		if ShouldPublishKafka() {
-			publisher, err := NewKurlyRowPublisherFromEnv()
+		if ShouldPublishRows() {
+			publisher, err := NewKurlyPublisherFromEnv()
 			if err != nil {
 				panic(err)
 			}
@@ -136,7 +136,7 @@ func RunKurlyCollection(ctx context.Context) {
 				defer publishMu.Unlock()
 				return publisher.Publish([]Row{row})
 			}
-			fmt.Println("Kurly 상세 완료 행 즉시 Kafka publish 활성화")
+			fmt.Println("Kurly 상세 완료 행 즉시 적재 활성화")
 		}
 		var streamFailedRows []Row
 		var streamPublishErr error
@@ -146,7 +146,7 @@ func RunKurlyCollection(ctx context.Context) {
 		fmt.Println("상세 수집 상품 수:", len(detailRows))
 		fmt.Println("====================================")
 		if streamPublishErr != nil {
-			fmt.Printf("[kafka] Kurly streaming publish failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortKafkaError(streamPublishErr))
+			fmt.Printf("[ingest] Kurly streaming ingest failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
 			if streamPublisher == nil {
 				panic(streamPublishErr)
 			}
@@ -155,19 +155,19 @@ func RunKurlyCollection(ctx context.Context) {
 					panic(err)
 				}
 			}
-			fmt.Printf("[kafka] Kurly streaming publish recovery succeeded failed_rows=%d\n", len(streamFailedRows))
+			fmt.Printf("[ingest] Kurly streaming ingest recovery succeeded failed_rows=%d\n", len(streamFailedRows))
 		}
 	} else {
 		fmt.Println("Kurly 상세 수집을 건너뜁니다: KURLY_COLLECT_DETAILS=false")
 	}
 
 	resultRows := MergeRows(listRows, detailRows)
-	if ShouldPublishKafka() && streamDetailPublish == nil {
+	if ShouldPublishRows() && streamDetailPublish == nil {
 		if err := PublishKurlyRowsFromEnv(resultRows); err != nil {
 			panic(err)
 		}
-	} else if ShouldPublishKafka() {
-		fmt.Println("Kurly Kafka 최종 일괄 publish 건너뜀: 상세 수집 완료 행을 즉시 publish했습니다.")
+	} else if ShouldPublishRows() {
+		fmt.Println("Kurly 최종 일괄 적재 건너뜀: 상세 수집 완료 행을 즉시 적재했습니다.")
 	}
 
 	fmt.Println("Kurly 최종 행 수:", len(resultRows))

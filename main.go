@@ -3260,13 +3260,13 @@ func SaveExcel(resultRows []Row, listRows []Row, detailRows []Row) error {
 	return f.SaveAs(OutputFile)
 }
 
-func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detailRows []Row, publishKafka bool) {
-	if ShouldPublishKafka() && publishKafka {
+func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detailRows []Row, publishRows bool) {
+	if ShouldPublishRows() && publishRows {
 		if err := PublishGmarketRowsFromEnv(resultRows); err != nil {
 			panic(err)
 		}
-	} else if ShouldPublishKafka() {
-		fmt.Println("Kafka 최종 일괄 publish 건너뜀: 상세 수집 완료 행을 즉시 publish했습니다.")
+	} else if ShouldPublishRows() {
+		fmt.Println("최종 일괄 적재 건너뜀: 상세 수집 완료 행을 즉시 적재했습니다.")
 	}
 
 	if SaveExcelEnabled {
@@ -3354,10 +3354,10 @@ func RunGmarketCollection(rootCtx context.Context) {
 		defer cancel()
 	}
 
-	var streamPublisher *GmarketRowPublisher
+	var streamPublisher RowPublisher
 	var streamDetailPublish func(Row) error
-	if ShouldPublishKafka() {
-		publisher, err := NewGmarketRowPublisherFromEnv()
+	if ShouldPublishRows() {
+		publisher, err := NewGmarketPublisherFromEnv()
 		if err != nil {
 			panic(err)
 		}
@@ -3368,7 +3368,7 @@ func RunGmarketCollection(rootCtx context.Context) {
 			defer publishMu.Unlock()
 			return publisher.Publish([]Row{row})
 		}
-		fmt.Println("Gmarket 상세 완료 행 즉시 Kafka publish 활성화")
+		fmt.Println("Gmarket 상세 완료 행 즉시 적재 활성화")
 	}
 
 	detailRows, streamFailedRows, streamPublishErr := CollectDetails(ctx, listRows, streamDetailPublish)
@@ -3380,7 +3380,7 @@ func RunGmarketCollection(rootCtx context.Context) {
 
 	resultRows := MergeRows(listRows, detailRows)
 	if streamPublishErr != nil {
-		fmt.Printf("[kafka] Gmarket streaming publish failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortKafkaError(streamPublishErr))
+		fmt.Printf("[ingest] Gmarket streaming ingest failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
 		if streamPublisher == nil {
 			panic(streamPublishErr)
 		}
@@ -3389,7 +3389,7 @@ func RunGmarketCollection(rootCtx context.Context) {
 				panic(err)
 			}
 		}
-		fmt.Printf("[kafka] Gmarket streaming publish recovery succeeded failed_rows=%d\n", len(streamFailedRows))
+		fmt.Printf("[ingest] Gmarket streaming ingest recovery succeeded failed_rows=%d\n", len(streamFailedRows))
 	}
 
 	fmt.Println("\n====================================")
@@ -3423,6 +3423,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Kafka 사전 점검 완료")
+	} else if ShouldWriteClickHouse() {
+		fmt.Println("ClickHouse 직접 적재 사전 점검 시작")
+		if err := PreflightClickHouseDirectFromEnv(context.Background()); err != nil {
+			fmt.Println("ClickHouse 직접 적재 사전 점검 실패:", shortIngestError(err))
+			os.Exit(1)
+		}
+		fmt.Println("ClickHouse 직접 적재 사전 점검 완료")
 	}
 
 	type platformRunner struct {

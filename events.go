@@ -35,7 +35,7 @@ func NewGmarketRowPublisherFromEnv() (*GmarketRowPublisher, error) {
 }
 
 func PublishGmarketRowsFromEnv(rows []Row) error {
-	publisher, err := NewGmarketRowPublisherFromEnv()
+	publisher, err := NewGmarketPublisherFromEnv()
 	if err != nil {
 		return err
 	}

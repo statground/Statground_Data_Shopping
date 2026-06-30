@@ -101,6 +101,38 @@ func TestBuildKurlyPayloadUsesKurlyFields(t *testing.T) {
 	}
 }
 
+func TestClickHouseRawRowSkipsUnknownRawRowAndKeepsPayload(t *testing.T) {
+	pub := ClickHouseRawPublisher{cfg: ClickHouseRawConfig{ProducerSource: "test_source", LineageTopic: "direct_clickhouse"}}
+	payload := map[string]any{
+		"uuid":                   "018f0000-0000-7000-8000-000000000001",
+		"provider":               "kurly",
+		"product_code":           "10012345",
+		"detail_collect_success": true,
+		"raw_row":                map[string]string{"상품명": "상세 이름"},
+	}
+
+	row, err := pub.buildRawRow(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := row["raw_row"]; ok {
+		t.Fatalf("raw_row should stay out of JSONEachRow columns: %#v", row)
+	}
+	if row["detail_collect_success"] != uint8(1) {
+		t.Fatalf("detail_collect_success = %#v, want uint8(1)", row["detail_collect_success"])
+	}
+	if row["source"] != "test_source" || row["kafka_topic"] != "direct_clickhouse" {
+		t.Fatalf("unexpected lineage fields: %#v", row)
+	}
+	var rawPayload map[string]any
+	if err := json.Unmarshal([]byte(row["payload"].(string)), &rawPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawPayload["raw_row"]; !ok {
+		t.Fatalf("payload should preserve raw_row: %#v", rawPayload)
+	}
+}
+
 func TestKurlyExtractProductRowsFromSearchJSON(t *testing.T) {
 	data := map[string]any{
 		"data": []any{

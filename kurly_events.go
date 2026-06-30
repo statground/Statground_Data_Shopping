@@ -37,7 +37,7 @@ func NewKurlyRowPublisherFromEnv() (*KurlyRowPublisher, error) {
 }
 
 func PublishKurlyRowsFromEnv(rows []Row) error {
-	publisher, err := NewKurlyRowPublisherFromEnv()
+	publisher, err := NewKurlyPublisherFromEnv()
 	if err != nil {
 		return err
 	}

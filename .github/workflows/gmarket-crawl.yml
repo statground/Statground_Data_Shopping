@@ -88,22 +88,11 @@ jobs:
       cancel-in-progress: true
 
     env:
-      INGEST_MODE: kafka
-      KAFKA_TOPIC: shopping.events
-      KAFKA_CLIENT_ID: statground-data-shopping-crawl
+      INGEST_MODE: clickhouse
       PRODUCER_SOURCE: github_actions
       PRODUCER_IP: "::"
-      KAFKA_WRITE_ATTEMPTS: "5"
-      KAFKA_WRITE_BACKOFF_MIN: "1.0"
-      KAFKA_WRITE_BACKOFF_MAX: "12.0"
-      KAFKA_WRITER_MAX_ATTEMPTS: "1"
-      KAFKA_READ_TIMEOUT_SECONDS: "8.0"
-      KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
-      KAFKA_PUBLISH_CHUNK_SIZE: "50"
-      KAFKA_PARTITION_FALLBACK_ENABLED: "true"
-      KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "600"
-      KAFKA_PREFLIGHT_REQUIRED: "true"
+      CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE: "100"
+      CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '0' }}
@@ -174,33 +163,17 @@ jobs:
 
       - name: Validate required repository secrets
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
           CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
         run: |
-          test -n "$KAFKA_BROKERS" || { echo "KAFKA_BROKERS secret is required"; exit 1; }
-          test -n "$KAFKA_USERNAME" || { echo "KAFKA_USERNAME secret is required"; exit 1; }
-          test -n "$KAFKA_PASSWORD" || { echo "KAFKA_PASSWORD secret is required"; exit 1; }
           test -n "$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_HOST secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PORT" || { echo "CLICKHOUSE_PORT secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
           test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
-          case ",$KAFKA_BROKERS," in
-            *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
-              echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
-              exit 1
-              ;;
-            *,180.66.240.243:50004,*)
-              echo "KAFKA_BROKERS still contains a retired Kafka endpoint; use the current public bootstrap endpoint"
-              exit 1
-              ;;
-          esac
 
       - name: Resolve Go modules and checksums
         env:
@@ -215,9 +188,12 @@ jobs:
       - name: Run crawler
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
         run: |
           if [ "$GMARKET_SAVE_EXCEL" = "true" ]; then
             mkdir -p "$(dirname "$GMARKET_OUTPUT_FILE")"
@@ -290,22 +266,11 @@ jobs:
         shard_index: [0, 1, 2, 3]
 
     env:
-      INGEST_MODE: kafka
-      KAFKA_TOPIC: shopping.events
-      KAFKA_CLIENT_ID: statground-data-shopping-gmarket-detail-${{ matrix.shard_index }}
+      INGEST_MODE: clickhouse
       PRODUCER_SOURCE: github_actions_detail_enrich
       PRODUCER_IP: "::"
-      KAFKA_WRITE_ATTEMPTS: "5"
-      KAFKA_WRITE_BACKOFF_MIN: "1.0"
-      KAFKA_WRITE_BACKOFF_MAX: "12.0"
-      KAFKA_WRITER_MAX_ATTEMPTS: "1"
-      KAFKA_READ_TIMEOUT_SECONDS: "8.0"
-      KAFKA_WRITE_TIMEOUT_SECONDS: "8.0"
-      KAFKA_PUBLISH_CHUNK_SIZE: "50"
-      KAFKA_PARTITION_FALLBACK_ENABLED: "true"
-      KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: "5.0"
-      KAFKA_RAW_PUBLISH_TIMEOUT_SECONDS: "600"
-      KAFKA_PREFLIGHT_REQUIRED: "true"
+      CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE: "100"
+      CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
       GMARKET_COLLECT_MODE: "random_best_categories"
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '0' }}
@@ -368,33 +333,17 @@ jobs:
 
       - name: Validate required repository secrets
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
           CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
         run: |
-          test -n "$KAFKA_BROKERS" || { echo "KAFKA_BROKERS secret is required"; exit 1; }
-          test -n "$KAFKA_USERNAME" || { echo "KAFKA_USERNAME secret is required"; exit 1; }
-          test -n "$KAFKA_PASSWORD" || { echo "KAFKA_PASSWORD secret is required"; exit 1; }
           test -n "$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_HOST secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PORT" || { echo "CLICKHOUSE_PORT secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
           test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
-          case ",$KAFKA_BROKERS," in
-            *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
-              echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
-              exit 1
-              ;;
-            *,180.66.240.243:50004,*)
-              echo "KAFKA_BROKERS still contains a retired Kafka endpoint; use the current public bootstrap endpoint"
-              exit 1
-              ;;
-          esac
 
       - name: Resolve Go modules and checksums
         env:
@@ -409,9 +358,12 @@ jobs:
       - name: Run detail enrichment shard
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
         run: |
           if [ "$GMARKET_SAVE_EXCEL" = "true" ]; then
             mkdir -p "$(dirname "$GMARKET_OUTPUT_FILE")"
