@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -342,5 +343,110 @@ func TestWriteMessagesWithRetryRetriesWriterDeadline(t *testing.T) {
 	}
 	if len(writes) != 2 || len(writes[0]) != 1 || writes[0][0] != "a" || len(writes[1]) != 1 || writes[1][0] != "a" {
 		t.Fatalf("writes mismatch: %#v", writes)
+	}
+}
+
+func TestWriteMessagesWithRetryRetriesOnlyFailedWriteErrors(t *testing.T) {
+	pub := KafkaPublisher{Cfg: KafkaConfig{
+		WriteAttempts:   3,
+		WriteBackoffMin: time.Millisecond,
+		WriteBackoffMax: time.Millisecond,
+	}}
+	messages := []kafka.Message{
+		{Key: []byte("a"), Value: []byte("1")},
+		{Key: []byte("b"), Value: []byte("2")},
+		{Key: []byte("c"), Value: []byte("3")},
+	}
+	errs := []error{
+		kafka.WriteErrors{nil, kafka.NotLeaderForPartition, kafka.NotLeaderForPartition},
+		nil,
+	}
+	writes := make([][]string, 0, len(errs))
+	attempt := 0
+	sleeps := 0
+
+	err := pub.writeMessagesWithRetry(context.Background(), messages, func() kafkaMessageWriter {
+		if attempt >= len(errs) {
+			t.Fatalf("unexpected writer attempt %d", attempt+1)
+		}
+		err := errs[attempt]
+		attempt++
+		return &fakeKafkaWriter{err: err, writes: &writes}
+	}, func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("writeMessagesWithRetry returned error: %v", err)
+	}
+
+	wantWrites := [][]string{{"a", "b", "c"}, {"b", "c"}}
+	if !reflect.DeepEqual(writes, wantWrites) {
+		t.Fatalf("writes mismatch\nwant: %#v\n got: %#v", wantWrites, writes)
+	}
+	if sleeps != 1 {
+		t.Fatalf("sleep count = %d, want 1", sleeps)
+	}
+}
+
+func TestWriteMessagesWithRetryRefreshesWriterBeforePartitionFallback(t *testing.T) {
+	pub := KafkaPublisher{Cfg: KafkaConfig{
+		WriteAttempts:     2,
+		WriteBackoffMin:   time.Millisecond,
+		WriteBackoffMax:   time.Millisecond,
+		PartitionFallback: true,
+	}}
+	messages := []kafka.Message{{Key: []byte("a"), Value: []byte("1")}}
+	errs := []error{kafka.WriteErrors{kafka.NotLeaderForPartition}, nil}
+	writes := make([][]string, 0, len(errs))
+	attempt := 0
+
+	err := pub.writeMessagesWithRetry(context.Background(), messages, func() kafkaMessageWriter {
+		if attempt >= len(errs) {
+			t.Fatalf("unexpected writer attempt %d", attempt+1)
+		}
+		err := errs[attempt]
+		attempt++
+		return &fakeKafkaWriter{err: err, writes: &writes}
+	}, func(context.Context, time.Duration) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("writeMessagesWithRetry returned error: %v", err)
+	}
+	if attempt != 2 {
+		t.Fatalf("attempt count = %d, want 2", attempt)
+	}
+	wantWrites := [][]string{{"a"}, {"a"}}
+	if !reflect.DeepEqual(writes, wantWrites) {
+		t.Fatalf("writes mismatch\nwant: %#v\n got: %#v", wantWrites, writes)
+	}
+}
+
+func TestPublishMessagesChunksLargeRecoveryBatch(t *testing.T) {
+	pub := KafkaPublisher{Cfg: KafkaConfig{PublishChunkSize: 2}}
+	messages := []kafka.Message{
+		{Key: []byte("a"), Value: []byte("1")},
+		{Key: []byte("b"), Value: []byte("2")},
+		{Key: []byte("c"), Value: []byte("3")},
+		{Key: []byte("d"), Value: []byte("4")},
+		{Key: []byte("e"), Value: []byte("5")},
+	}
+	got := [][]string{}
+	err := pub.publishMessages(context.Background(), messages, func(_ context.Context, chunk []kafka.Message) error {
+		keys := make([]string, 0, len(chunk))
+		for _, msg := range chunk {
+			keys = append(keys, string(msg.Key))
+		}
+		got = append(got, keys)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("publishMessages returned error: %v", err)
+	}
+
+	want := [][]string{{"a", "b"}, {"c", "d"}, {"e"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("chunks mismatch\nwant: %#v\n got: %#v", want, got)
 	}
 }

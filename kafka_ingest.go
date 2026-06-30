@@ -25,6 +25,7 @@ type KafkaConfig struct {
 	Topic              string
 	ClientID           string
 	BatchSize          int
+	PublishChunkSize   int
 	BatchTimeout       time.Duration
 	WriterMaxAttempts  int
 	ReadTimeout        time.Duration
@@ -93,6 +94,7 @@ func NewKafkaPublisherFromEnv() (*KafkaPublisher, error) {
 		PreflightRequired:  envBool("KAFKA_PREFLIGHT_REQUIRED", true),
 		RejectAdvertised:   splitCSV(envString("KAFKA_REJECT_ADVERTISED_BROKERS", "")),
 	}
+	cfg.PublishChunkSize = positiveInt(envString("KAFKA_PUBLISH_CHUNK_SIZE", strconv.Itoa(cfg.BatchSize)), cfg.BatchSize)
 	if cfg.WriteBackoffMax < cfg.WriteBackoffMin {
 		cfg.WriteBackoffMax = cfg.WriteBackoffMin
 	}
@@ -195,19 +197,65 @@ func (p *KafkaPublisher) Publish(ctx context.Context, events []KafkaEvent) error
 			Time:  NowKST(),
 		})
 	}
-	return p.writeMessagesWithRetry(ctx, messages, func() kafkaMessageWriter {
-		return p.writer()
-	}, sleepContext)
+	return p.publishMessages(ctx, messages, func(ctx context.Context, chunk []kafka.Message) error {
+		return p.writeMessagesWithRetry(ctx, chunk, func() kafkaMessageWriter {
+			return p.writer()
+		}, sleepContext)
+	})
+}
+
+func (p *KafkaPublisher) publishMessages(ctx context.Context, messages []kafka.Message, publish func(context.Context, []kafka.Message) error) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	chunkSize := p.Cfg.PublishChunkSize
+	if chunkSize <= 0 {
+		chunkSize = p.Cfg.BatchSize
+	}
+	if chunkSize <= 0 {
+		chunkSize = 100
+	}
+	if chunkSize >= len(messages) {
+		return publish(ctx, messages)
+	}
+	for start := 0; start < len(messages); start += chunkSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := start + chunkSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+		if err := publish(ctx, messages[start:end]); err != nil {
+			return fmt.Errorf("kafka publish chunk failed offset=%d size=%d total=%d: %w", start, end-start, len(messages), err)
+		}
+	}
+	return nil
 }
 
 func (p *KafkaPublisher) writeMessagesWithRetry(ctx context.Context, messages []kafka.Message, newWriter func() kafkaMessageWriter, sleep func(context.Context, time.Duration) error) error {
 	if len(messages) == 0 {
 		return nil
 	}
+	attempts := p.Cfg.WriteAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoffMin := p.Cfg.WriteBackoffMin
+	if backoffMin <= 0 {
+		backoffMin = time.Second
+	}
+	backoffMax := p.Cfg.WriteBackoffMax
+	if backoffMax <= 0 {
+		backoffMax = 12 * time.Second
+	}
+	if backoffMax < backoffMin {
+		backoffMax = backoffMin
+	}
 
 	pending := messages
 	var lastErr error
-	for attempt := 1; attempt <= p.Cfg.WriteAttempts; attempt++ {
+	for attempt := 1; attempt <= attempts; attempt++ {
 		w := newWriter()
 		err := w.WriteMessages(ctx, pending...)
 		_ = w.Close()
@@ -223,18 +271,24 @@ func (p *KafkaPublisher) writeMessagesWithRetry(ctx context.Context, messages []
 			return err
 		}
 		failed, retryable := retryableFailedMessages(pending, err)
-		if len(failed) == 0 || !retryable || attempt == p.Cfg.WriteAttempts {
+		if len(failed) == 0 {
+			return nil
+		}
+		if !retryable {
 			return err
 		}
-		if p.Cfg.PartitionFallback && shouldUsePartitionFallback(err) {
+		if p.Cfg.PartitionFallback && shouldUsePartitionFallback(err) && attempt == attempts {
 			if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
 				return nil
 			} else {
-				return fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err))
+				return fmt.Errorf("kafka publish failed after retries and fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err))
 			}
 		}
-		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, p.Cfg.WriteAttempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
-		if err := sleep(ctx, kafkaBackoffDuration(attempt, p.Cfg.WriteBackoffMin, p.Cfg.WriteBackoffMax)); err != nil {
+		if attempt == attempts {
+			return err
+		}
+		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, attempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
+		if err := sleep(ctx, kafkaBackoffDuration(attempt, backoffMin, backoffMax)); err != nil {
 			return fmt.Errorf("kafka retry wait stopped: %w; last_error=%s", err, shortKafkaError(lastErr))
 		}
 		pending = failed
