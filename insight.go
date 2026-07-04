@@ -249,11 +249,12 @@ func newInsightCHClientFromEnv() (*insightCHClient, error) {
 	if host == "" || port == "" || user == "" || password == "" {
 		return nil, fmt.Errorf("missing ClickHouse env: CLICKHOUSE_HOST/PORT/USER/PASSWORD")
 	}
+	timeout := secondsDefault(envString("SHOPPING_INSIGHT_HTTP_TIMEOUT_SECONDS", envString("CLICKHOUSE_REQUEST_TIMEOUT_SECONDS", "240")), 240*time.Second)
 	return &insightCHClient{
 		url:      fmt.Sprintf("%s://%s:%s%s", protocol, host, port, path),
 		user:     user,
 		password: password,
-		client:   &http.Client{Timeout: 90 * time.Second},
+		client:   &http.Client{Timeout: timeout},
 	}, nil
 }
 
@@ -784,10 +785,7 @@ func buildInsightDealCandidates(products []insightProduct, limit int) []insightD
 		}
 		return out[i].PriceKRW < out[j].PriceKRW
 	})
-	if limit > 0 && len(out) > limit {
-		return out[:limit]
-	}
-	return out
+	return interleaveInsightDealCandidatesByProvider(out, limit)
 }
 
 func topInsightProducts(products []insightProduct, limit int) []insightProduct {
@@ -803,10 +801,128 @@ func topInsightProducts(products []insightProduct, limit int) []insightProduct {
 		}
 		return out[i].PriceKRW < out[j].PriceKRW
 	})
-	if limit > 0 && len(out) > limit {
-		return out[:limit]
+	return interleaveInsightProductsByProvider(out, limit)
+}
+
+func interleaveInsightProductsByProvider(items []insightProduct, limit int) []insightProduct {
+	if limit <= 0 {
+		limit = len(items)
+	}
+	if len(items) <= 1 || limit <= 0 {
+		return items
+	}
+	buckets := map[string][]insightProduct{}
+	for _, item := range items {
+		provider := normalizeInsightProvider(item.Provider)
+		buckets[provider] = append(buckets[provider], item)
+	}
+	providers := orderedInsightProviders(buckets)
+	if len(providers) < 2 {
+		if len(items) > limit {
+			return append([]insightProduct(nil), items[:limit]...)
+		}
+		return items
+	}
+	out := make([]insightProduct, 0, minInsightInt(limit, len(items)))
+	for len(out) < limit && len(out) < len(items) {
+		progress := false
+		for _, provider := range providers {
+			bucket := buckets[provider]
+			if len(bucket) == 0 {
+				continue
+			}
+			out = append(out, bucket[0])
+			buckets[provider] = bucket[1:]
+			progress = true
+			if len(out) >= limit {
+				break
+			}
+		}
+		if !progress {
+			break
+		}
 	}
 	return out
+}
+
+func interleaveInsightDealCandidatesByProvider(items []insightDealCandidate, limit int) []insightDealCandidate {
+	if limit <= 0 {
+		limit = len(items)
+	}
+	if len(items) <= 1 || limit <= 0 {
+		return items
+	}
+	buckets := map[string][]insightDealCandidate{}
+	for _, item := range items {
+		provider := normalizeInsightProvider(item.Provider)
+		buckets[provider] = append(buckets[provider], item)
+	}
+	providers := orderedInsightProviders(buckets)
+	if len(providers) < 2 {
+		if len(items) > limit {
+			return append([]insightDealCandidate(nil), items[:limit]...)
+		}
+		return items
+	}
+	out := make([]insightDealCandidate, 0, minInsightInt(limit, len(items)))
+	for len(out) < limit && len(out) < len(items) {
+		progress := false
+		for _, provider := range providers {
+			bucket := buckets[provider]
+			if len(bucket) == 0 {
+				continue
+			}
+			out = append(out, bucket[0])
+			buckets[provider] = bucket[1:]
+			progress = true
+			if len(out) >= limit {
+				break
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	return out
+}
+
+func orderedInsightProviders[T any](buckets map[string][]T) []string {
+	out := make([]string, 0, len(buckets))
+	for _, provider := range []string{"gmarket", "kurly"} {
+		if len(buckets[provider]) > 0 {
+			out = append(out, provider)
+		}
+	}
+	extras := make([]string, 0, len(buckets))
+	for provider, items := range buckets {
+		if len(items) == 0 || provider == "gmarket" || provider == "kurly" {
+			continue
+		}
+		extras = append(extras, provider)
+	}
+	sort.Strings(extras)
+	return append(out, extras...)
+}
+
+func normalizeInsightProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "kurly":
+		return "kurly"
+	case "gmarket":
+		return "gmarket"
+	default:
+		if strings.TrimSpace(provider) != "" {
+			return strings.ToLower(strings.TrimSpace(provider))
+		}
+		return "gmarket"
+	}
+}
+
+func minInsightInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 type insightAgg struct {
