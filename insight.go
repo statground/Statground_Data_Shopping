@@ -21,6 +21,7 @@ import (
 )
 
 const defaultShoppingInsightSnapshotTable = "Data_Shopping_Service.shopping_price_insight_snapshot"
+const defaultShoppingKeywordSearchMartTable = "Data_Shopping_Service.shopping_keyword_search_mart"
 const insightKeywordPayloadLimit = 240
 const insightCategoryKeywordPayloadLimit = 800
 const insightCategoryKeywordPerCategoryLimit = 40
@@ -226,6 +227,38 @@ type insightSnapshotInsert struct {
 	CreatedAt            string `json:"created_at"`
 }
 
+type insightKeywordSearchMartInsert struct {
+	KeywordUUID          string  `json:"keyword_uuid"`
+	SnapshotUUID         string  `json:"snapshot_uuid"`
+	ScopeSlug            string  `json:"scope_slug"`
+	ScopeCategory        string  `json:"scope_category"`
+	Version              uint64  `json:"version"`
+	GeneratedAt          string  `json:"generated_at"`
+	SourceMaxCollectedAt string  `json:"source_max_collected_at"`
+	SourceProductCount   uint64  `json:"source_product_count"`
+	Keyword              string  `json:"keyword"`
+	KeywordKey           string  `json:"keyword_key"`
+	SearchText           string  `json:"search_text"`
+	ProductCount         uint64  `json:"product_count"`
+	CategoryCount        uint64  `json:"category_count"`
+	SellerCount          uint64  `json:"seller_count"`
+	BrandCount           uint64  `json:"brand_count"`
+	ReviewSum            uint64  `json:"review_sum"`
+	OrderSum             uint64  `json:"order_sum"`
+	MinPriceKRW          int     `json:"min_price_krw"`
+	P25PriceKRW          int     `json:"p25_price_krw"`
+	MedianPriceKRW       int     `json:"median_price_krw"`
+	P75PriceKRW          int     `json:"p75_price_krw"`
+	MaxPriceKRW          int     `json:"max_price_krw"`
+	DemandScore          float64 `json:"demand_score"`
+	CompetitionScore     float64 `json:"competition_score"`
+	SaturationScore      float64 `json:"saturation_score"`
+	OpportunityScore     float64 `json:"opportunity_score"`
+	CategoriesJSON       string  `json:"categories_json"`
+	ProductsJSON         string  `json:"products_json"`
+	CreatedAt            string  `json:"created_at"`
+}
+
 func RunShoppingInsightRefreshFromEnv(ctx context.Context) error {
 	client, err := newInsightCHClientFromEnv()
 	if err != nil {
@@ -242,14 +275,25 @@ func RunShoppingInsightRefreshFromEnv(ctx context.Context) error {
 	if table == "" {
 		return fmt.Errorf("invalid SHOPPING_INSIGHT_SNAPSHOT_TABLE")
 	}
-	snapshots, err := buildInsightSnapshots(products)
+	searchMartTable := safeInsightIdentifierPath(envString("SHOPPING_KEYWORD_SEARCH_MART_TABLE", defaultShoppingKeywordSearchMartTable))
+	if searchMartTable == "" {
+		return fmt.Errorf("invalid SHOPPING_KEYWORD_SEARCH_MART_TABLE")
+	}
+	snapshots, generatedAt, version, err := buildInsightSnapshots(products)
 	if err != nil {
 		return err
 	}
 	if err := client.insertInsightSnapshots(ctx, table, snapshots); err != nil {
 		return err
 	}
-	fmt.Printf("Shopping Price Insight snapshot refreshed scopes=%d products=%d table=%s\n", len(snapshots), len(products), table)
+	searchRows, err := buildInsightKeywordSearchMartRows(products, generatedAt, version)
+	if err != nil {
+		return err
+	}
+	if err := client.insertInsightKeywordSearchMart(ctx, searchMartTable, searchRows); err != nil {
+		return err
+	}
+	fmt.Printf("Shopping Price Insight snapshot refreshed scopes=%d products=%d table=%s keyword_search_rows=%d keyword_search_table=%s\n", len(snapshots), len(products), table, len(searchRows), searchMartTable)
 	return nil
 }
 
@@ -458,7 +502,27 @@ func (c *insightCHClient) insertInsightSnapshots(ctx context.Context, table stri
 	return err
 }
 
-func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, error) {
+func (c *insightCHClient) insertInsightKeywordSearchMart(ctx context.Context, table string, rows []insightKeywordSearchMartInsert) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var body strings.Builder
+	body.WriteString("INSERT INTO ")
+	body.WriteString(table)
+	body.WriteString(" FORMAT JSONEachRow\n")
+	for _, row := range rows {
+		b, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		body.Write(b)
+		body.WriteByte('\n')
+	}
+	_, err := c.post(ctx, body.String())
+	return err
+}
+
+func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, time.Time, uint64, error) {
 	generatedAt := NowKST()
 	generatedText := FormatCHDateTime64Millis(generatedAt)
 	version := uint64(generatedAt.UnixMilli())
@@ -471,7 +535,7 @@ func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, 
 	allRadar := buildInsightRadar(products, "", allCategories, allCategories, generatedAt)
 	allPayload, err := json.Marshal(allRadar)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, 0, err
 	}
 	rows = append(rows, insightSnapshotInsert{
 		SnapshotUUID:         NewUUIDv7(),
@@ -492,7 +556,7 @@ func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, 
 		radar := buildInsightRadar(scoped, category.SourceCategory, allCategories, []insightCategoryBenchmark{category}, generatedAt)
 		payload, err := json.Marshal(radar)
 		if err != nil {
-			return nil, err
+			return nil, time.Time{}, 0, err
 		}
 		rows = append(rows, insightSnapshotInsert{
 			SnapshotUUID:         NewUUIDv7(),
@@ -506,7 +570,154 @@ func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, 
 			CreatedAt:            generatedText,
 		})
 	}
+	return rows, generatedAt, version, nil
+}
+
+func buildInsightKeywordSearchMartRows(products []insightProduct, generatedAt time.Time, version uint64) ([]insightKeywordSearchMartInsert, error) {
+	generatedText := FormatCHDateTime64Millis(generatedAt)
+	allCategories := buildInsightCategoryBenchmarks(products, 40)
+	categoryProducts := map[string][]insightProduct{}
+	for _, p := range products {
+		categoryProducts[p.SourceCategory] = append(categoryProducts[p.SourceCategory], p)
+	}
+	rows := []insightKeywordSearchMartInsert{}
+	rows = append(rows, buildInsightKeywordSearchMartScope(products, "all", "", NewUUIDv7(), generatedText, version)...)
+	for _, category := range allCategories {
+		scoped := categoryProducts[category.SourceCategory]
+		if len(scoped) == 0 {
+			continue
+		}
+		rows = append(rows, buildInsightKeywordSearchMartScope(scoped, insightCategorySlug(category.SourceCategory), category.SourceCategory, NewUUIDv7(), generatedText, version)...)
+	}
 	return rows, nil
+}
+
+func buildInsightKeywordSearchMartScope(products []insightProduct, scopeSlug, scopeCategory, snapshotUUID, generatedText string, version uint64) []insightKeywordSearchMartInsert {
+	benchmarks := buildInsightKeywordBenchmarks(products, 0)
+	productsByKeyword := map[string][]insightProduct{}
+	for _, p := range products {
+		for _, keyword := range p.Keywords {
+			productsByKeyword[keyword] = append(productsByKeyword[keyword], p)
+		}
+	}
+	rows := make([]insightKeywordSearchMartInsert, 0, len(benchmarks))
+	sourceMaxCollectedAt := latestInsightCollectedAt(products)
+	for _, row := range benchmarks {
+		key := insightKeywordKey(row.Keyword)
+		if key == "" {
+			continue
+		}
+		keywordProducts := productsByKeyword[row.Keyword]
+		if len(keywordProducts) == 0 {
+			continue
+		}
+		categories := uniqueInsightCategories(keywordProducts)
+		categoriesJSON, _ := json.Marshal(categories)
+		evidence := topInsightProducts(keywordProducts, insightEvidenceProductLimit)
+		productsJSON, _ := json.Marshal(evidence)
+		minPrice, maxPrice := insightProductPriceBounds(keywordProducts)
+		rows = append(rows, insightKeywordSearchMartInsert{
+			KeywordUUID:          NewUUIDv7(),
+			SnapshotUUID:         snapshotUUID,
+			ScopeSlug:            scopeSlug,
+			ScopeCategory:        scopeCategory,
+			Version:              version,
+			GeneratedAt:          generatedText,
+			SourceMaxCollectedAt: sourceMaxCollectedAt,
+			SourceProductCount:   uint64(len(products)),
+			Keyword:              row.Keyword,
+			KeywordKey:           key,
+			SearchText:           insightKeywordSearchText(row.Keyword, categories, keywordProducts),
+			ProductCount:         uint64(row.ProductCount),
+			CategoryCount:        uint64(row.CategoryCount),
+			SellerCount:          uint64(row.SellerCount),
+			BrandCount:           uint64(row.BrandCount),
+			ReviewSum:            uint64(row.ReviewSum),
+			OrderSum:             uint64(row.OrderSum),
+			MinPriceKRW:          minPrice,
+			P25PriceKRW:          row.P25PriceKRW,
+			MedianPriceKRW:       row.MedianPriceKRW,
+			P75PriceKRW:          row.P75PriceKRW,
+			MaxPriceKRW:          maxPrice,
+			DemandScore:          row.DemandScore,
+			CompetitionScore:     row.CompetitionScore,
+			SaturationScore:      row.SaturationScore,
+			OpportunityScore:     row.OpportunityScore,
+			CategoriesJSON:       string(categoriesJSON),
+			ProductsJSON:         string(productsJSON),
+			CreatedAt:            generatedText,
+		})
+	}
+	return rows
+}
+
+func insightKeywordKey(keyword string) string {
+	tokens := insightTokenizeBasic(keyword)
+	if len(tokens) == 0 {
+		return strings.ToLower(strings.TrimSpace(norm.NFKC.String(keyword)))
+	}
+	return strings.Join(tokens, " ")
+}
+
+func uniqueInsightCategories(products []insightProduct) []string {
+	seen := map[string]struct{}{}
+	categories := make([]string, 0, 4)
+	for _, p := range products {
+		category := strings.TrimSpace(p.SourceCategory)
+		if category == "" {
+			continue
+		}
+		if _, ok := seen[category]; ok {
+			continue
+		}
+		seen[category] = struct{}{}
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	return categories
+}
+
+func insightProductPriceBounds(products []insightProduct) (int, int) {
+	minPrice := 0
+	maxPrice := 0
+	for _, p := range products {
+		if p.PriceKRW <= 0 {
+			continue
+		}
+		if minPrice == 0 || p.PriceKRW < minPrice {
+			minPrice = p.PriceKRW
+		}
+		if p.PriceKRW > maxPrice {
+			maxPrice = p.PriceKRW
+		}
+	}
+	return minPrice, maxPrice
+}
+
+func insightKeywordSearchText(keyword string, categories []string, products []insightProduct) string {
+	parts := make([]string, 0, 8+len(products)*6)
+	parts = append(parts, keyword)
+	parts = append(parts, categories...)
+	productLimit := minInsightInt(len(products), 160)
+	for _, p := range products[:productLimit] {
+		parts = append(parts,
+			p.ProductName,
+			p.ProductLabel,
+			p.Brand,
+			p.Seller,
+			p.SourceCategory,
+			p.CategoryPath,
+			p.SearchKeyword,
+			p.ProductCode,
+		)
+	}
+	text := strings.ToLower(norm.NFKC.String(strings.Join(parts, " ")))
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if len(runes) > 12000 {
+		return string(runes[:12000])
+	}
+	return text
 }
 
 func buildInsightRadar(products []insightProduct, scopeCategory string, categoryOptions, categories []insightCategoryBenchmark, generatedAt time.Time) insightRadar {
