@@ -24,6 +24,10 @@ const defaultShoppingInsightSnapshotTable = "Data_Shopping_Service.shopping_pric
 const insightKeywordPayloadLimit = 240
 const insightCategoryKeywordPayloadLimit = 800
 const insightCategoryKeywordPerCategoryLimit = 40
+const insightEvidenceProductLimit = 24
+const insightEvidenceDealCandidateLimit = 24
+const insightRangeEvidenceProductLimit = 80
+const insightRangeEvidenceDealCandidateLimit = 60
 
 var insightSplitRe = regexp.MustCompile(`[^0-9a-zA-Z가-힣]+`)
 var insightDigitRe = regexp.MustCompile(`[0-9]`)
@@ -522,8 +526,8 @@ func buildInsightRadar(products []insightProduct, scopeCategory string, category
 		Keywords:         buildInsightKeywordBenchmarks(products, insightKeywordPayloadLimit),
 		CategoryKeywords: buildInsightCategoryKeywords(products, insightCategoryKeywordPayloadLimit),
 		PriceRangeSlices: buildInsightPriceRangeSlices(products),
-		Products:         topInsightProducts(products, 24),
-		DealCandidates:   buildInsightDealCandidates(products, 24),
+		Products:         topInsightProducts(products, insightEvidenceProductLimit),
+		DealCandidates:   buildInsightDealCandidates(products, insightEvidenceDealCandidateLimit),
 		PriceDrops:       []map[string]any{},
 		SellerInsights:   buildInsightSellerInsights(categories, len(categories)),
 		PolicyNotes:      insightPolicyNotes(),
@@ -671,8 +675,8 @@ func buildInsightPriceRangeSlices(products []insightProduct) []insightPriceRange
 			Categories:       categories,
 			Keywords:         buildInsightKeywordBenchmarks(scoped, insightKeywordPayloadLimit),
 			CategoryKeywords: buildInsightCategoryKeywords(scoped, insightCategoryKeywordPayloadLimit),
-			Products:         topInsightProducts(scoped, 24),
-			DealCandidates:   buildInsightDealCandidates(scoped, 24),
+			Products:         topInsightProducts(scoped, insightRangeEvidenceProductLimit),
+			DealCandidates:   buildInsightDealCandidates(scoped, insightRangeEvidenceDealCandidateLimit),
 			SellerInsights:   buildInsightSellerInsights(categories, len(categories)),
 		})
 	}
