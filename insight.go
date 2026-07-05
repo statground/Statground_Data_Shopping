@@ -21,6 +21,9 @@ import (
 )
 
 const defaultShoppingInsightSnapshotTable = "Data_Shopping_Service.shopping_price_insight_snapshot"
+const insightKeywordPayloadLimit = 240
+const insightCategoryKeywordPayloadLimit = 800
+const insightCategoryKeywordPerCategoryLimit = 40
 
 var insightSplitRe = regexp.MustCompile(`[^0-9a-zA-Z가-힣]+`)
 var insightDigitRe = regexp.MustCompile(`[0-9]`)
@@ -516,8 +519,8 @@ func buildInsightRadar(products []insightProduct, scopeCategory string, category
 		PriceBands:       buildInsightPriceBands(products),
 		Categories:       categories,
 		CategoryOptions:  categoryOptions,
-		Keywords:         buildInsightKeywordBenchmarks(products, 30),
-		CategoryKeywords: buildInsightCategoryKeywords(products, 320),
+		Keywords:         buildInsightKeywordBenchmarks(products, insightKeywordPayloadLimit),
+		CategoryKeywords: buildInsightCategoryKeywords(products, insightCategoryKeywordPayloadLimit),
 		PriceRangeSlices: buildInsightPriceRangeSlices(products),
 		Products:         topInsightProducts(products, 24),
 		DealCandidates:   buildInsightDealCandidates(products, 24),
@@ -666,8 +669,8 @@ func buildInsightPriceRangeSlices(products []insightProduct) []insightPriceRange
 			Summary:          buildInsightSummary(scoped),
 			PriceBands:       buildInsightPriceBands(scoped),
 			Categories:       categories,
-			Keywords:         buildInsightKeywordBenchmarks(scoped, 30),
-			CategoryKeywords: buildInsightCategoryKeywords(scoped, 320),
+			Keywords:         buildInsightKeywordBenchmarks(scoped, insightKeywordPayloadLimit),
+			CategoryKeywords: buildInsightCategoryKeywords(scoped, insightCategoryKeywordPayloadLimit),
 			Products:         topInsightProducts(scoped, 24),
 			DealCandidates:   buildInsightDealCandidates(scoped, 24),
 			SellerInsights:   buildInsightSellerInsights(categories, len(categories)),
@@ -869,8 +872,8 @@ func buildInsightCategoryKeywords(products []insightProduct, limit int) []insigh
 			}
 			return rows[i].Keyword < rows[j].Keyword
 		})
-		if len(rows) > 8 {
-			rows = rows[:8]
+		if len(rows) > insightCategoryKeywordPerCategoryLimit {
+			rows = rows[:insightCategoryKeywordPerCategoryLimit]
 		}
 		out = append(out, rows...)
 	}
@@ -1438,7 +1441,7 @@ var insightStopwords = map[string]struct{}{
 	"manual": {}, "medicine": {}, "natural": {}, "new": {}, "no": {}, "not": {}, "of": {}, "office": {}, "official": {}, "olbaan": {}, "on": {}, "one": {}, "only": {}, "or": {}, "other": {}, "our": {}, "out": {}, "over": {}, "pack": {}, "per": {}, "plus": {}, "portable": {}, "premium": {}, "product": {}, "products": {}, "purpose": {},
 	"sale": {}, "seban": {}, "set": {}, "she": {}, "slim": {}, "sneak": {}, "so": {}, "some": {}, "starbuck": {}, "sticky": {}, "such": {}, "supplies": {}, "than": {}, "that": {}, "the": {}, "their": {}, "them": {}, "then": {}, "there": {}, "these": {}, "they": {}, "this": {}, "to": {}, "up": {}, "use": {}, "using": {}, "wando": {},
 	"was": {}, "we": {}, "were": {}, "what": {}, "when": {}, "where": {}, "which": {}, "who": {}, "will": {}, "with": {}, "you": {}, "your": {},
-	"가격": {}, "기획": {}, "단독": {}, "대용량": {}, "묶음": {}, "무료": {}, "무료배송": {}, "배송": {}, "베스트": {}, "상품": {}, "선택": {}, "세일": {}, "세트": {}, "신상": {}, "옵션": {}, "전용": {}, "정품": {}, "추가": {}, "컬리": {}, "특가": {}, "할인": {},
+	"가격": {}, "기획": {}, "골라": {}, "골라담기": {}, "담기": {}, "단독": {}, "대용량": {}, "마켓컬리": {}, "묶음": {}, "무료": {}, "무료배송": {}, "배송": {}, "베스트": {}, "상품": {}, "선택": {}, "세일": {}, "세트": {}, "신상": {}, "옵션": {}, "전용": {}, "정품": {}, "추가": {}, "컬리": {}, "특가": {}, "할인": {},
 	"공식": {}, "국내": {}, "국산": {}, "모음": {}, "수입": {}, "신선": {}, "예약": {}, "인기": {}, "증정": {}, "직구": {}, "카시오": {}, "해외": {},
 }
 
