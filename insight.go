@@ -68,6 +68,7 @@ type insightRadar struct {
 	CategoryOptions  []insightCategoryBenchmark      `json:"category_options"`
 	Keywords         []insightKeywordBenchmark       `json:"keywords"`
 	CategoryKeywords []insightCategoryKeywordInsight `json:"category_keywords"`
+	PriceRangeSlices []insightPriceRangeSlice        `json:"price_range_slices,omitempty"`
 	Products         []insightProduct                `json:"products"`
 	DealCandidates   []insightDealCandidate          `json:"deal_candidates"`
 	PriceDrops       []map[string]any                `json:"price_drop_candidates"`
@@ -189,6 +190,21 @@ type insightPolicyNote struct {
 	Label  string `json:"label"`
 	Status string `json:"status"`
 	Detail string `json:"detail"`
+}
+
+type insightPriceRangeSlice struct {
+	Key              string                          `json:"key"`
+	Label            string                          `json:"label"`
+	MinPriceKRW      int                             `json:"min_price_krw"`
+	MaxPriceKRW      int                             `json:"max_price_krw,omitempty"`
+	Summary          insightRadarSummary             `json:"summary"`
+	PriceBands       []insightPriceBand              `json:"price_bands"`
+	Categories       []insightCategoryBenchmark      `json:"categories"`
+	Keywords         []insightKeywordBenchmark       `json:"keywords"`
+	CategoryKeywords []insightCategoryKeywordInsight `json:"category_keywords"`
+	Products         []insightProduct                `json:"products"`
+	DealCandidates   []insightDealCandidate          `json:"deal_candidates"`
+	SellerInsights   []insightSellerInsight          `json:"seller_insights"`
 }
 
 type insightSnapshotInsert struct {
@@ -502,6 +518,7 @@ func buildInsightRadar(products []insightProduct, scopeCategory string, category
 		CategoryOptions:  categoryOptions,
 		Keywords:         buildInsightKeywordBenchmarks(products, 30),
 		CategoryKeywords: buildInsightCategoryKeywords(products, 320),
+		PriceRangeSlices: buildInsightPriceRangeSlices(products),
 		Products:         topInsightProducts(products, 24),
 		DealCandidates:   buildInsightDealCandidates(products, 24),
 		PriceDrops:       []map[string]any{},
@@ -619,6 +636,144 @@ func buildInsightPriceBands(products []insightProduct) []insightPriceBand {
 		bands[i].Interpretation = insightPriceBandInterpretation(bands[i])
 	}
 	return bands
+}
+
+func buildInsightPriceRangeSlices(products []insightProduct) []insightPriceRangeSlice {
+	boundaries := insightPriceRangeBoundaries(products)
+	if len(boundaries) < 2 {
+		return nil
+	}
+	out := []insightPriceRangeSlice{}
+	for i := 1; i < len(boundaries); i++ {
+		minPrice := boundaries[i-1]
+		if i > 1 {
+			minPrice++
+		}
+		maxPrice := boundaries[i]
+		if maxPrice < minPrice {
+			continue
+		}
+		scoped := filterInsightProductsByPriceRange(products, minPrice, maxPrice)
+		if len(scoped) == 0 {
+			continue
+		}
+		categories := buildInsightCategoryBenchmarks(scoped, 40)
+		out = append(out, insightPriceRangeSlice{
+			Key:              insightPriceRangeKey(minPrice, maxPrice),
+			Label:            insightPriceRangeLabel(minPrice, maxPrice),
+			MinPriceKRW:      minPrice,
+			MaxPriceKRW:      maxPrice,
+			Summary:          buildInsightSummary(scoped),
+			PriceBands:       buildInsightPriceBands(scoped),
+			Categories:       categories,
+			Keywords:         buildInsightKeywordBenchmarks(scoped, 30),
+			CategoryKeywords: buildInsightCategoryKeywords(scoped, 320),
+			Products:         topInsightProducts(scoped, 24),
+			DealCandidates:   buildInsightDealCandidates(scoped, 24),
+			SellerInsights:   buildInsightSellerInsights(categories, len(categories)),
+		})
+	}
+	return out
+}
+
+func insightPriceRangeBoundaries(products []insightProduct) []int {
+	prices := make([]int, 0, len(products))
+	for _, p := range products {
+		if p.PriceKRW > 0 {
+			prices = append(prices, p.PriceKRW)
+		}
+	}
+	sort.Ints(prices)
+	if len(prices) == 0 {
+		return nil
+	}
+	minPrice := prices[0]
+	maxPrice := prices[len(prices)-1]
+	if minPrice == maxPrice {
+		return []int{minPrice, maxPrice}
+	}
+	seen := map[int]struct{}{minPrice: {}}
+	out := []int{minPrice}
+	span := maxPrice - minPrice
+	for i := 1; i < 5; i++ {
+		boundary := roundInsightPriceBoundary(minPrice + (span*i)/5)
+		if boundary <= minPrice || boundary >= maxPrice {
+			continue
+		}
+		if _, ok := seen[boundary]; ok {
+			continue
+		}
+		seen[boundary] = struct{}{}
+		out = append(out, boundary)
+	}
+	out = append(out, maxPrice)
+	sort.Ints(out)
+	return out
+}
+
+func roundInsightPriceBoundary(value int) int {
+	unit := insightPriceRangeRoundUnit(value)
+	if unit <= 0 {
+		return value
+	}
+	return int(math.Round(float64(value)/float64(unit))) * unit
+}
+
+func insightPriceRangeRoundUnit(value int) int {
+	n := value
+	if n < 0 {
+		n = -n
+	}
+	switch {
+	case n >= 1000000:
+		return 100000
+	case n >= 100000:
+		return 10000
+	case n >= 10000:
+		return 1000
+	default:
+		return 100
+	}
+}
+
+func insightPriceRangeKey(minPrice, maxPrice int) string {
+	return fmt.Sprintf("range:%d-%d", maxInsightInt(0, minPrice), maxInsightInt(0, maxPrice))
+}
+
+func insightPriceRangeLabel(minPrice, maxPrice int) string {
+	if minPrice <= 0 {
+		return fmt.Sprintf("~₩%s", formatInsightNumber(maxPrice))
+	}
+	return fmt.Sprintf("₩%s~₩%s", formatInsightNumber(minPrice), formatInsightNumber(maxPrice))
+}
+
+func formatInsightNumber(value int) string {
+	text := fmt.Sprintf("%d", value)
+	n := len(text)
+	if n <= 3 {
+		return text
+	}
+	var out strings.Builder
+	first := n % 3
+	if first == 0 {
+		first = 3
+	}
+	out.WriteString(text[:first])
+	for i := first; i < n; i += 3 {
+		out.WriteByte(',')
+		out.WriteString(text[i : i+3])
+	}
+	return out.String()
+}
+
+func filterInsightProductsByPriceRange(products []insightProduct, minPrice, maxPrice int) []insightProduct {
+	out := make([]insightProduct, 0, len(products))
+	for _, p := range products {
+		if p.PriceKRW >= minPrice && p.PriceKRW <= maxPrice {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func buildInsightKeywordBenchmarks(products []insightProduct, limit int) []insightKeywordBenchmark {
@@ -920,6 +1075,13 @@ func normalizeInsightProvider(provider string) string {
 
 func minInsightInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInsightInt(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
