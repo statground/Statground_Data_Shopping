@@ -8,6 +8,7 @@ require (
 	github.com/chromedp/chromedp v0.15.1
 	github.com/segmentio/kafka-go v0.4.48
 	github.com/xuri/excelize/v2 v2.10.1
+	golang.org/x/text v0.35.0
 )
 
 require (
@@ -27,5 +28,4 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
 )

@@ -101,7 +101,9 @@ jobs:
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'korean' }}
       GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit || '0' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
-      GMARKET_COLLECT_DETAILS: ${{ github.event.inputs.collect_details || 'true' }}
+      GMARKET_COLLECT_DETAILS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.collect_details || 'false' }}
+      GMARKET_STREAM_INSERT_BATCH_SIZE: ${{ vars.GMARKET_STREAM_INSERT_BATCH_SIZE || '50' }}
+      CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS || '30' }}
       GMARKET_SAVE_EXCEL: ${{ github.event.inputs.save_excel || 'false' }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "2"
@@ -126,6 +128,7 @@ jobs:
       KURLY_SEARCH_PAGES_PER_KEYWORD: "3"
       KURLY_PRODUCTS_PER_KEYWORD: "16"
       KURLY_COLLECT_DETAILS: "true"
+      KURLY_STREAM_INSERT_BATCH_SIZE: ${{ vars.KURLY_STREAM_INSERT_BATCH_SIZE || '50' }}
       KURLY_DETAIL_LIMIT: "0"
       KURLY_DETAIL_CONCURRENCY: "8"
       KURLY_REQUEST_SLEEP_MIN_MS: "200"
@@ -143,7 +146,7 @@ jobs:
 
       - name: Set up Chrome
         id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
           install-dependencies: true
@@ -174,6 +177,9 @@ jobs:
           test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
           test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
+          if [[ "${CLICKHOUSE_PROTOCOL,,}" != "https" ]]; then
+            echo "::warning::ClickHouse transport is not TLS-protected; configure CLICKHOUSE_PROTOCOL=https with certificate verification"
+          fi
 
       - name: Resolve Go modules and checksums
         env:
@@ -313,7 +319,7 @@ jobs:
 
       - name: Set up Chrome
         id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
           install-dependencies: true

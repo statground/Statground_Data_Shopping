@@ -3356,22 +3356,25 @@ func RunGmarketCollection(rootCtx context.Context) {
 
 	var streamPublisher RowPublisher
 	var streamDetailPublish func(Row) error
+	var streamBatchPublisher *BufferedRowPublisher
 	if ShouldPublishRows() {
 		publisher, err := NewGmarketPublisherFromEnv()
 		if err != nil {
 			panic(err)
 		}
 		streamPublisher = publisher
-		var publishMu sync.Mutex
-		streamDetailPublish = func(row Row) error {
-			publishMu.Lock()
-			defer publishMu.Unlock()
-			return publisher.Publish([]Row{row})
-		}
-		fmt.Println("Gmarket 상세 완료 행 즉시 적재 활성화")
+		streamBatchPublisher = NewBufferedRowPublisher(publisher, positiveInt(envString("GMARKET_STREAM_INSERT_BATCH_SIZE", "50"), 50))
+		streamDetailPublish = streamBatchPublisher.Add
+		fmt.Printf("Gmarket 상세 완료 행 배치 적재 활성화 batch_size=%d\n", streamBatchPublisher.batchSize)
 	}
 
 	detailRows, streamFailedRows, streamPublishErr := CollectDetails(ctx, listRows, streamDetailPublish)
+	if streamBatchPublisher != nil {
+		if flushErr := streamBatchPublisher.Flush(); flushErr != nil {
+			streamPublishErr = flushErr
+			streamFailedRows = streamBatchPublisher.PendingRows()
+		}
+	}
 
 	fmt.Println("\n====================================")
 	fmt.Println("상세 수집 완료")

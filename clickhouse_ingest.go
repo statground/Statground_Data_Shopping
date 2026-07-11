@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,62 @@ type RowPublisher interface {
 	Publish([]Row) error
 }
 
+type BufferedRowPublisher struct {
+	publisher RowPublisher
+	batchSize int
+	pending   []Row
+	lastErr   error
+}
+
+func NewBufferedRowPublisher(publisher RowPublisher, batchSize int) *BufferedRowPublisher {
+	if batchSize <= 0 {
+		batchSize = 50
+	}
+	return &BufferedRowPublisher{publisher: publisher, batchSize: batchSize, pending: make([]Row, 0, batchSize)}
+}
+
+func (b *BufferedRowPublisher) Add(row Row) error {
+	b.pending = append(b.pending, row)
+	if b.lastErr != nil || len(b.pending) < b.batchSize {
+		return nil
+	}
+	if err := b.flush(); err != nil {
+		b.lastErr = err
+	}
+	return nil
+}
+
+func (b *BufferedRowPublisher) Flush() error {
+	if len(b.pending) == 0 {
+		return b.lastErr
+	}
+	if err := b.flush(); err != nil {
+		b.lastErr = err
+		return err
+	}
+	b.lastErr = nil
+	return nil
+}
+
+func (b *BufferedRowPublisher) PendingRows() []Row {
+	return append([]Row(nil), b.pending...)
+}
+
+func (b *BufferedRowPublisher) flush() error {
+	if b.publisher == nil {
+		return fmt.Errorf("buffered row publisher is not initialized")
+	}
+	if len(b.pending) == 0 {
+		return nil
+	}
+	batch := append([]Row(nil), b.pending...)
+	if err := b.publisher.Publish(batch); err != nil {
+		return err
+	}
+	b.pending = b.pending[:0]
+	return nil
+}
+
 type ClickHouseRawConfig struct {
 	URL              string
 	User             string
@@ -28,6 +85,7 @@ type ClickHouseRawConfig struct {
 	KurlyTable       string
 	InsertChunkSize  int
 	RequestTimeout   time.Duration
+	AttemptTimeout   time.Duration
 	ProducerSource   string
 	LineageTopic     string
 	LineagePartition uint32
@@ -130,6 +188,7 @@ func NewClickHouseRawPublisherFromEnv() (*ClickHouseRawPublisher, error) {
 		KurlyTable:       kurlyTable,
 		InsertChunkSize:  positiveInt(envString("CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE", "100"), 100),
 		RequestTimeout:   timeout,
+		AttemptTimeout:   secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS", "30"), 30*time.Second),
 		ProducerSource:   envString("PRODUCER_SOURCE", "github_actions"),
 		LineageTopic:     envString("CLICKHOUSE_DIRECT_LINEAGE_TOPIC", "direct_clickhouse"),
 		LineagePartition: 0,
@@ -146,8 +205,17 @@ func PreflightClickHouseDirectFromEnv(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := pub.exec(ctx, "SELECT 1"); err != nil {
-		return fmt.Errorf("clickhouse direct preflight failed to connect: %w", err)
+	var connectErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if connectErr = pub.exec(ctx, "SELECT 1"); connectErr == nil {
+			break
+		}
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+	}
+	if connectErr != nil {
+		return fmt.Errorf("clickhouse direct preflight failed to connect after 3 attempts: %w", connectErr)
 	}
 	if err := pub.exec(ctx, "CHECK GRANT INSERT ON "+pub.cfg.GmarketTable); err != nil {
 		return fmt.Errorf("clickhouse direct preflight missing Gmarket raw insert grant: %w", err)
@@ -260,30 +328,51 @@ func (p *ClickHouseRawPublisher) insertJSONEachRowChunk(ctx context.Context, tab
 	var body bytes.Buffer
 	body.WriteString("INSERT INTO ")
 	body.WriteString(table)
-	body.WriteString(" FORMAT JSONEachRow\n")
+	payload := bytes.Buffer{}
 	for _, row := range rows {
 		line, err := json.Marshal(row)
 		if err != nil {
 			return err
 		}
-		body.Write(line)
-		body.WriteByte('\n')
+		payload.Write(line)
+		payload.WriteByte('\n')
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.URL, &body)
-	if err != nil {
-		return err
+	token := fmt.Sprintf("%x", sha256.Sum256(append([]byte(table+"\x1f"), payload.Bytes()...)))
+	body.WriteString(" SETTINGS insert_deduplicate = 1, insert_deduplication_token = '")
+	body.WriteString(token)
+	body.WriteString("' FORMAT JSONEachRow\n")
+	body.Write(payload.Bytes())
+	bodyBytes := body.Bytes()
+	var lastErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, p.cfg.AttemptTimeout)
+		req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, p.cfg.URL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			cancel()
+			return err
+		}
+		req.SetBasicAuth(p.cfg.User, p.cfg.Password)
+		resp, err := p.client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				cancel()
+				return nil
+			}
+			err = fmt.Errorf("clickhouse status=%d", resp.StatusCode)
+		}
+		lastErr = err
+		cancel()
+		if attempt < 2 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
 	}
-	req.SetBasicAuth(p.cfg.User, p.cfg.Password)
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("clickhouse status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return nil
+	return lastErr
 }
 
 func (p *ClickHouseRawPublisher) exec(ctx context.Context, sql string) error {
