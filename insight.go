@@ -22,6 +22,7 @@ import (
 
 const defaultShoppingInsightSnapshotTable = "Data_Shopping_Service.shopping_price_insight_snapshot"
 const defaultShoppingKeywordSearchMartTable = "Data_Shopping_Service.shopping_keyword_search_mart"
+const defaultShoppingInsightPublishedBatchTable = "Data_Shopping_Service.shopping_price_insight_published_batch"
 const insightKeywordPayloadLimit = 240
 const insightCategoryKeywordPayloadLimit = 800
 const insightCategoryKeywordPerCategoryLimit = 40
@@ -32,6 +33,20 @@ const insightRangeEvidenceDealCandidateLimit = 60
 
 var insightSplitRe = regexp.MustCompile(`[^0-9a-zA-Z가-힣]+`)
 var insightDigitRe = regexp.MustCompile(`[0-9]`)
+var insightUUIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+var insightStandardCategories = []string{
+	"식품",
+	"생활/주방",
+	"뷰티/헬스",
+	"패션/잡화",
+	"디지털/가전",
+	"가구/홈",
+	"스포츠/레저",
+	"유아/반려",
+	"도서/취미/문구",
+	"여행/e쿠폰",
+}
 
 type insightCHClient struct {
 	url      string
@@ -259,11 +274,84 @@ type insightKeywordSearchMartInsert struct {
 	CreatedAt            string  `json:"created_at"`
 }
 
+type insightPublishedBatchInsert struct {
+	RefreshUUID          string `json:"refresh_uuid"`
+	Version              uint64 `json:"version"`
+	GeneratedAt          string `json:"generated_at"`
+	SourceMaxCollectedAt string `json:"source_max_collected_at"`
+	SourceProductCount   uint64 `json:"source_product_count"`
+	ExpectedScopeCount   uint16 `json:"expected_scope_count"`
+	SnapshotScopeCount   uint16 `json:"snapshot_scope_count"`
+	KeywordScopeCount    uint16 `json:"keyword_scope_count"`
+	KeywordRowCount      uint64 `json:"keyword_row_count"`
+	PublishedAt          string `json:"published_at"`
+}
+
+type insightRefreshTables struct {
+	snapshot       string
+	keywordSearch  string
+	publishedBatch string
+}
+
+type insightRefreshVerification struct {
+	SnapshotRows                 uint64   `json:"snapshot_rows"`
+	SnapshotScopes               []string `json:"snapshot_scopes"`
+	SnapshotInvalidPayloads      uint64   `json:"snapshot_invalid_payloads"`
+	SnapshotVersionMismatches    uint64   `json:"snapshot_version_mismatches"`
+	SnapshotSourceMaxCollectedAt string   `json:"snapshot_source_max_collected_at"`
+	SnapshotSourceProductCount   uint64   `json:"snapshot_source_product_count"`
+	KeywordRows                  uint64   `json:"keyword_rows"`
+	KeywordScopes                []string `json:"keyword_scopes"`
+	KeywordInvalidPayloads       uint64   `json:"keyword_invalid_payloads"`
+	KeywordVersionMismatches     uint64   `json:"keyword_version_mismatches"`
+	KeywordSourceMaxCollectedAt  string   `json:"keyword_source_max_collected_at"`
+	KeywordSourceProductCount    uint64   `json:"keyword_source_product_count"`
+}
+
+type shoppingInsightRefreshClient interface {
+	fetchInsightProducts(context.Context) ([]insightProduct, error)
+	insertInsightSnapshots(context.Context, string, []insightSnapshotInsert) error
+	insertInsightKeywordSearchMart(context.Context, string, []insightKeywordSearchMartInsert) error
+	verifyInsightRefresh(context.Context, insightRefreshTables, uint64) (insightRefreshVerification, error)
+	insertInsightPublishedBatch(context.Context, string, insightPublishedBatchInsert) error
+	verifyInsightPublishedBatch(context.Context, string, insightPublishedBatchInsert) error
+}
+
 func RunShoppingInsightRefreshFromEnv(ctx context.Context) error {
 	client, err := newInsightCHClientFromEnv()
 	if err != nil {
 		return err
 	}
+	tables, err := insightRefreshTablesFromEnv()
+	if err != nil {
+		return err
+	}
+	return runShoppingInsightRefresh(ctx, client, tables)
+}
+
+func insightRefreshTablesFromEnv() (insightRefreshTables, error) {
+	publishedBatchTable := firstNonEmptyEnv("SHOPPING_PRICE_INSIGHT_PUBLISHED_BATCH_TABLE", "SHOPPING_INSIGHT_PUBLISHED_BATCH_TABLE")
+	if publishedBatchTable == "" {
+		publishedBatchTable = defaultShoppingInsightPublishedBatchTable
+	}
+	tables := insightRefreshTables{
+		snapshot:       safeInsightIdentifierPath(envString("SHOPPING_INSIGHT_SNAPSHOT_TABLE", defaultShoppingInsightSnapshotTable)),
+		keywordSearch:  safeInsightIdentifierPath(envString("SHOPPING_KEYWORD_SEARCH_MART_TABLE", defaultShoppingKeywordSearchMartTable)),
+		publishedBatch: safeInsightIdentifierPath(publishedBatchTable),
+	}
+	if tables.snapshot == "" {
+		return insightRefreshTables{}, fmt.Errorf("invalid SHOPPING_INSIGHT_SNAPSHOT_TABLE")
+	}
+	if tables.keywordSearch == "" {
+		return insightRefreshTables{}, fmt.Errorf("invalid SHOPPING_KEYWORD_SEARCH_MART_TABLE")
+	}
+	if tables.publishedBatch == "" {
+		return insightRefreshTables{}, fmt.Errorf("invalid SHOPPING_PRICE_INSIGHT_PUBLISHED_BATCH_TABLE")
+	}
+	return tables, nil
+}
+
+func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefreshClient, tables insightRefreshTables) error {
 	products, err := client.fetchInsightProducts(ctx)
 	if err != nil {
 		return err
@@ -271,29 +359,55 @@ func RunShoppingInsightRefreshFromEnv(ctx context.Context) error {
 	if len(products) == 0 {
 		return fmt.Errorf("shopping insight refresh skipped: no current shopping products")
 	}
-	table := safeInsightIdentifierPath(envString("SHOPPING_INSIGHT_SNAPSHOT_TABLE", defaultShoppingInsightSnapshotTable))
-	if table == "" {
-		return fmt.Errorf("invalid SHOPPING_INSIGHT_SNAPSHOT_TABLE")
-	}
-	searchMartTable := safeInsightIdentifierPath(envString("SHOPPING_KEYWORD_SEARCH_MART_TABLE", defaultShoppingKeywordSearchMartTable))
-	if searchMartTable == "" {
-		return fmt.Errorf("invalid SHOPPING_KEYWORD_SEARCH_MART_TABLE")
-	}
 	snapshots, generatedAt, version, err := buildInsightSnapshots(products)
 	if err != nil {
-		return err
-	}
-	if err := client.insertInsightSnapshots(ctx, table, snapshots); err != nil {
 		return err
 	}
 	searchRows, err := buildInsightKeywordSearchMartRows(products, generatedAt, version)
 	if err != nil {
 		return err
 	}
-	if err := client.insertInsightKeywordSearchMart(ctx, searchMartTable, searchRows); err != nil {
+	if err := validateInsightRefreshBuild(products, snapshots, searchRows, version); err != nil {
 		return err
 	}
-	fmt.Printf("Shopping Price Insight snapshot refreshed scopes=%d products=%d table=%s keyword_search_rows=%d keyword_search_table=%s\n", len(snapshots), len(products), table, len(searchRows), searchMartTable)
+
+	// Build both products completely before the first write. Keyword rows are
+	// written first and snapshots second; neither becomes serving-authoritative
+	// until the completed-batch marker is appended after verification below.
+	if err := client.insertInsightKeywordSearchMart(ctx, tables.keywordSearch, searchRows); err != nil {
+		return err
+	}
+	if err := client.insertInsightSnapshots(ctx, tables.snapshot, snapshots); err != nil {
+		return err
+	}
+	verification, err := client.verifyInsightRefresh(ctx, tables, version)
+	if err != nil {
+		return err
+	}
+	if err := validateInsightRefreshVerification(products, snapshots, searchRows, version, verification); err != nil {
+		return err
+	}
+
+	generatedText := FormatCHDateTime64Millis(generatedAt)
+	batch := insightPublishedBatchInsert{
+		RefreshUUID:          NewUUIDv7(),
+		Version:              version,
+		GeneratedAt:          generatedText,
+		SourceMaxCollectedAt: latestInsightCollectedAt(products),
+		SourceProductCount:   uint64(len(products)),
+		ExpectedScopeCount:   uint16(len(insightExpectedScopeSlugs())),
+		SnapshotScopeCount:   uint16(len(verification.SnapshotScopes)),
+		KeywordScopeCount:    uint16(len(verification.KeywordScopes)),
+		KeywordRowCount:      verification.KeywordRows,
+		PublishedAt:          FormatCHDateTime64Millis(NowKST()),
+	}
+	if err := client.insertInsightPublishedBatch(ctx, tables.publishedBatch, batch); err != nil {
+		return err
+	}
+	if err := client.verifyInsightPublishedBatch(ctx, tables.publishedBatch, batch); err != nil {
+		return err
+	}
+	fmt.Printf("Shopping Price Insight complete batch published version=%d scopes=%d products=%d table=%s keyword_search_rows=%d keyword_search_table=%s published_batch_table=%s\n", version, len(snapshots), len(products), tables.snapshot, len(searchRows), tables.keywordSearch, tables.publishedBatch)
 	return nil
 }
 
@@ -335,7 +449,17 @@ func firstNonEmptyEnv(names ...string) string {
 }
 
 func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, strings.NewReader(sql))
+	endpoint, err := url.Parse(c.url)
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	// Price fields and verification counters are Int64/UInt64. Force JSONEachRow
+	// to emit JSON numbers instead of quoted values so overflow-safe decoding is
+	// deterministic for every ClickHouse server profile.
+	query.Set("output_format_json_quote_64bit_integers", "0")
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(sql))
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +477,76 @@ func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) 
 }
 
 func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightProduct, error) {
-	sql := `
+	body, err := c.post(ctx, shoppingInsightProductsSQL())
+	if err != nil {
+		return nil, err
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 1024), 1024*1024*10)
+	products := []insightProduct{}
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var raw struct {
+			Provider          string `json:"provider"`
+			ProductCode       string `json:"product_code"`
+			ProductName       string `json:"product_name"`
+			SourceCategoryRaw string `json:"source_category_raw"`
+			GroupCode         string `json:"group_code"`
+			SearchKeyword     string `json:"search_keyword"`
+			ImageURL          string `json:"image_url"`
+			ProductURL        string `json:"product_url"`
+			PriceKRW          int    `json:"price_krw"`
+			OriginalPriceKRW  int    `json:"original_price_krw"`
+			Brand             string `json:"brand"`
+			Seller            string `json:"seller"`
+			CategoryPath      string `json:"category_path"`
+			ReviewCount       int    `json:"review_count"`
+			OrderCount        int    `json:"order_count"`
+			CollectedAt       string `json:"collected_at"`
+			UpdatedAt         string `json:"updated_at"`
+		}
+		if err := json.Unmarshal(line, &raw); err != nil {
+			return nil, err
+		}
+		category := normalizeInsightCategory(raw.Provider, raw.SourceCategoryRaw, raw.CategoryPath, raw.SearchKeyword, raw.ProductName)
+		category = insightStandardCategory(category)
+		if category == "" {
+			return nil, fmt.Errorf("shopping insight refresh rejected: product category is outside the standard scope set")
+		}
+		p := insightProduct{
+			Provider:         raw.Provider,
+			ProductCode:      raw.ProductCode,
+			ProductName:      cleanInsightText(raw.ProductName),
+			SourceCategory:   category,
+			GroupCode:        raw.GroupCode,
+			SearchKeyword:    raw.SearchKeyword,
+			ImageURL:         raw.ImageURL,
+			RawProductURL:    raw.ProductURL,
+			PriceKRW:         raw.PriceKRW,
+			OriginalPriceKRW: raw.OriginalPriceKRW,
+			Brand:            cleanInsightText(raw.Brand),
+			Seller:           cleanInsightText(raw.Seller),
+			CategoryPath:     raw.CategoryPath,
+			ReviewCount:      raw.ReviewCount,
+			OrderCount:       raw.OrderCount,
+			CollectedAt:      raw.CollectedAt,
+			UpdatedAt:        raw.UpdatedAt,
+		}
+		decorateInsightProduct(&p)
+		p.Keywords = preprocessInsightKeywords(p)
+		products = append(products, p)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return products, nil
+}
+
+func shoppingInsightProductsSQL() string {
+	return `
 SELECT
     provider,
     product_code,
@@ -363,8 +556,8 @@ SELECT
     search_keyword,
     image_url,
     product_url,
-    toInt32(price_krw) AS price_krw,
-    toInt32(original_price_krw) AS original_price_krw,
+    toInt64(round(price_krw)) AS price_krw,
+    toInt64(round(original_price_krw)) AS original_price_krw,
     brand,
     seller,
     category_path,
@@ -422,67 +615,6 @@ FROM
 )
 ORDER BY provider ASC, product_code ASC
 FORMAT JSONEachRow`
-	body, err := c.post(ctx, sql)
-	if err != nil {
-		return nil, err
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 1024), 1024*1024*10)
-	products := []insightProduct{}
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var raw struct {
-			Provider          string `json:"provider"`
-			ProductCode       string `json:"product_code"`
-			ProductName       string `json:"product_name"`
-			SourceCategoryRaw string `json:"source_category_raw"`
-			GroupCode         string `json:"group_code"`
-			SearchKeyword     string `json:"search_keyword"`
-			ImageURL          string `json:"image_url"`
-			ProductURL        string `json:"product_url"`
-			PriceKRW          int    `json:"price_krw"`
-			OriginalPriceKRW  int    `json:"original_price_krw"`
-			Brand             string `json:"brand"`
-			Seller            string `json:"seller"`
-			CategoryPath      string `json:"category_path"`
-			ReviewCount       int    `json:"review_count"`
-			OrderCount        int    `json:"order_count"`
-			CollectedAt       string `json:"collected_at"`
-			UpdatedAt         string `json:"updated_at"`
-		}
-		if err := json.Unmarshal(line, &raw); err != nil {
-			return nil, err
-		}
-		p := insightProduct{
-			Provider:         raw.Provider,
-			ProductCode:      raw.ProductCode,
-			ProductName:      cleanInsightText(raw.ProductName),
-			SourceCategory:   normalizeInsightCategory(raw.Provider, raw.SourceCategoryRaw, raw.CategoryPath, raw.SearchKeyword, raw.ProductName),
-			GroupCode:        raw.GroupCode,
-			SearchKeyword:    raw.SearchKeyword,
-			ImageURL:         raw.ImageURL,
-			RawProductURL:    raw.ProductURL,
-			PriceKRW:         raw.PriceKRW,
-			OriginalPriceKRW: raw.OriginalPriceKRW,
-			Brand:            cleanInsightText(raw.Brand),
-			Seller:           cleanInsightText(raw.Seller),
-			CategoryPath:     raw.CategoryPath,
-			ReviewCount:      raw.ReviewCount,
-			OrderCount:       raw.OrderCount,
-			CollectedAt:      raw.CollectedAt,
-			UpdatedAt:        raw.UpdatedAt,
-		}
-		decorateInsightProduct(&p)
-		p.Keywords = preprocessInsightKeywords(p)
-		products = append(products, p)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return products, nil
 }
 
 func (c *insightCHClient) insertInsightSnapshots(ctx context.Context, table string, rows []insightSnapshotInsert) error {
@@ -522,6 +654,119 @@ func (c *insightCHClient) insertInsightKeywordSearchMart(ctx context.Context, ta
 	return err
 }
 
+func (c *insightCHClient) verifyInsightRefresh(ctx context.Context, tables insightRefreshTables, version uint64) (insightRefreshVerification, error) {
+	query := fmt.Sprintf(`
+SELECT
+    (SELECT count() FROM %s WHERE version = %d) AS snapshot_rows,
+    (SELECT arraySort(groupUniqArray(scope_slug)) FROM %s WHERE version = %d) AS snapshot_scopes,
+    (SELECT countIf(NOT isValidJSON(payload_json)) FROM %s WHERE version = %d) AS snapshot_invalid_payloads,
+    (SELECT countIf(toUInt64(toUnixTimestamp64Milli(generated_at)) != version) FROM %s WHERE version = %d) AS snapshot_version_mismatches,
+    (SELECT formatDateTime(maxIf(source_max_collected_at, scope_slug = 'all'), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') FROM %s WHERE version = %d) AS snapshot_source_max_collected_at,
+    (SELECT maxIf(source_product_count, scope_slug = 'all') FROM %s WHERE version = %d) AS snapshot_source_product_count,
+    (SELECT count() FROM %s WHERE version = %d) AS keyword_rows,
+    (SELECT arraySort(groupUniqArray(scope_slug)) FROM %s WHERE version = %d) AS keyword_scopes,
+    (SELECT countIf(NOT isValidJSON(categories_json) OR NOT isValidJSON(products_json)) FROM %s WHERE version = %d) AS keyword_invalid_payloads,
+    (SELECT countIf(toUInt64(toUnixTimestamp64Milli(generated_at)) != version) FROM %s WHERE version = %d) AS keyword_version_mismatches,
+    (SELECT formatDateTime(maxIf(source_max_collected_at, scope_slug = 'all'), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') FROM %s WHERE version = %d) AS keyword_source_max_collected_at,
+    (SELECT maxIf(source_product_count, scope_slug = 'all') FROM %s WHERE version = %d) AS keyword_source_product_count
+FORMAT JSONEachRow`,
+		tables.snapshot, version,
+		tables.snapshot, version,
+		tables.snapshot, version,
+		tables.snapshot, version,
+		tables.snapshot, version,
+		tables.snapshot, version,
+		tables.keywordSearch, version,
+		tables.keywordSearch, version,
+		tables.keywordSearch, version,
+		tables.keywordSearch, version,
+		tables.keywordSearch, version,
+		tables.keywordSearch, version,
+	)
+	body, err := c.post(ctx, query)
+	if err != nil {
+		return insightRefreshVerification{}, err
+	}
+	var verification insightRefreshVerification
+	if err := decodeInsightJSONEachRow(body, &verification); err != nil {
+		return insightRefreshVerification{}, fmt.Errorf("decode shopping insight refresh verification: %w", err)
+	}
+	return verification, nil
+}
+
+func (c *insightCHClient) insertInsightPublishedBatch(ctx context.Context, table string, row insightPublishedBatchInsert) error {
+	body, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	query := "INSERT INTO " + table + " FORMAT JSONEachRow\n" + string(body) + "\n"
+	_, err = c.post(ctx, query)
+	return err
+}
+
+func (c *insightCHClient) verifyInsightPublishedBatch(ctx context.Context, table string, expected insightPublishedBatchInsert) error {
+	if !insightUUIDRe.MatchString(expected.RefreshUUID) {
+		return fmt.Errorf("invalid shopping insight refresh UUID")
+	}
+	type markerVerification struct {
+		Rows                 uint64 `json:"rows"`
+		Version              uint64 `json:"version"`
+		GeneratedVersion     uint64 `json:"generated_version"`
+		InvalidPublishedAt   uint64 `json:"invalid_published_at"`
+		SourceMaxCollectedAt string `json:"source_max_collected_at"`
+		SourceProductCount   uint64 `json:"source_product_count"`
+		ExpectedScopeCount   uint16 `json:"expected_scope_count"`
+		SnapshotScopeCount   uint16 `json:"snapshot_scope_count"`
+		KeywordScopeCount    uint16 `json:"keyword_scope_count"`
+		KeywordRowCount      uint64 `json:"keyword_row_count"`
+	}
+	query := fmt.Sprintf(`
+SELECT
+    count() AS rows,
+    max(version) AS version,
+    toUInt64(toUnixTimestamp64Milli(max(generated_at))) AS generated_version,
+    countIf(published_at < generated_at) AS invalid_published_at,
+    formatDateTime(max(source_max_collected_at), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') AS source_max_collected_at,
+    max(source_product_count) AS source_product_count,
+    max(expected_scope_count) AS expected_scope_count,
+    max(snapshot_scope_count) AS snapshot_scope_count,
+    max(keyword_scope_count) AS keyword_scope_count,
+    max(keyword_row_count) AS keyword_row_count
+FROM %s
+WHERE refresh_uuid = toUUID('%s')
+  AND version = %d
+FORMAT JSONEachRow`, table, expected.RefreshUUID, expected.Version)
+	body, err := c.post(ctx, query)
+	if err != nil {
+		return err
+	}
+	var got markerVerification
+	if err := decodeInsightJSONEachRow(body, &got); err != nil {
+		return fmt.Errorf("decode shopping insight published-batch verification: %w", err)
+	}
+	if got.Rows != 1 || got.Version != expected.Version || got.GeneratedVersion != expected.Version || got.InvalidPublishedAt != 0 ||
+		got.SourceMaxCollectedAt != expected.SourceMaxCollectedAt ||
+		got.SourceProductCount != expected.SourceProductCount ||
+		got.ExpectedScopeCount != expected.ExpectedScopeCount ||
+		got.SnapshotScopeCount != expected.SnapshotScopeCount ||
+		got.KeywordScopeCount != expected.KeywordScopeCount ||
+		got.KeywordRowCount != expected.KeywordRowCount {
+		return fmt.Errorf("shopping insight published-batch marker verification failed")
+	}
+	return nil
+}
+
+func decodeInsightJSONEachRow(body []byte, target any) error {
+	line := bytes.TrimSpace(body)
+	if len(line) == 0 {
+		return fmt.Errorf("empty ClickHouse response")
+	}
+	if index := bytes.IndexByte(line, '\n'); index >= 0 {
+		line = bytes.TrimSpace(line[:index])
+	}
+	return json.Unmarshal(line, target)
+}
+
 func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, time.Time, uint64, error) {
 	generatedAt := NowKST()
 	generatedText := FormatCHDateTime64Millis(generatedAt)
@@ -548,20 +793,25 @@ func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, 
 		PayloadJSON:          string(allPayload),
 		CreatedAt:            generatedText,
 	})
+	benchmarksByCategory := map[string]insightCategoryBenchmark{}
 	for _, category := range allCategories {
-		scoped := categoryProducts[category.SourceCategory]
+		benchmarksByCategory[category.SourceCategory] = category
+	}
+	for _, categoryName := range insightStandardCategories {
+		scoped := categoryProducts[categoryName]
 		if len(scoped) == 0 {
 			continue
 		}
-		radar := buildInsightRadar(scoped, category.SourceCategory, allCategories, []insightCategoryBenchmark{category}, generatedAt)
+		category := benchmarksByCategory[categoryName]
+		radar := buildInsightRadar(scoped, categoryName, allCategories, []insightCategoryBenchmark{category}, generatedAt)
 		payload, err := json.Marshal(radar)
 		if err != nil {
 			return nil, time.Time{}, 0, err
 		}
 		rows = append(rows, insightSnapshotInsert{
 			SnapshotUUID:         NewUUIDv7(),
-			ScopeSlug:            insightCategorySlug(category.SourceCategory),
-			ScopeCategory:        category.SourceCategory,
+			ScopeSlug:            insightCategorySlug(categoryName),
+			ScopeCategory:        categoryName,
 			Version:              version,
 			GeneratedAt:          generatedText,
 			SourceMaxCollectedAt: latestInsightCollectedAt(scoped),
@@ -575,21 +825,138 @@ func buildInsightSnapshots(products []insightProduct) ([]insightSnapshotInsert, 
 
 func buildInsightKeywordSearchMartRows(products []insightProduct, generatedAt time.Time, version uint64) ([]insightKeywordSearchMartInsert, error) {
 	generatedText := FormatCHDateTime64Millis(generatedAt)
-	allCategories := buildInsightCategoryBenchmarks(products, 40)
 	categoryProducts := map[string][]insightProduct{}
 	for _, p := range products {
 		categoryProducts[p.SourceCategory] = append(categoryProducts[p.SourceCategory], p)
 	}
 	rows := []insightKeywordSearchMartInsert{}
 	rows = append(rows, buildInsightKeywordSearchMartScope(products, "all", "", NewUUIDv7(), generatedText, version)...)
-	for _, category := range allCategories {
-		scoped := categoryProducts[category.SourceCategory]
+	for _, category := range insightStandardCategories {
+		scoped := categoryProducts[category]
 		if len(scoped) == 0 {
 			continue
 		}
-		rows = append(rows, buildInsightKeywordSearchMartScope(scoped, insightCategorySlug(category.SourceCategory), category.SourceCategory, NewUUIDv7(), generatedText, version)...)
+		rows = append(rows, buildInsightKeywordSearchMartScope(scoped, insightCategorySlug(category), category, NewUUIDv7(), generatedText, version)...)
 	}
 	return rows, nil
+}
+
+func validateInsightRefreshBuild(products []insightProduct, snapshots []insightSnapshotInsert, searchRows []insightKeywordSearchMartInsert, version uint64) error {
+	if len(products) == 0 || version == 0 {
+		return fmt.Errorf("shopping insight build validation failed: empty source or version")
+	}
+	standardSet := make(map[string]struct{}, len(insightStandardCategories))
+	categoryCounts := make(map[string]int, len(insightStandardCategories))
+	for _, category := range insightStandardCategories {
+		standardSet[category] = struct{}{}
+	}
+	for _, product := range products {
+		if product.PriceKRW <= 0 {
+			return fmt.Errorf("shopping insight build validation failed: non-positive price")
+		}
+		if _, ok := standardSet[product.SourceCategory]; !ok {
+			return fmt.Errorf("shopping insight build validation failed: category outside the standard scope set")
+		}
+		categoryCounts[product.SourceCategory]++
+	}
+	for _, category := range insightStandardCategories {
+		if categoryCounts[category] == 0 {
+			return fmt.Errorf("shopping insight build validation failed: standard category coverage is incomplete")
+		}
+	}
+
+	expectedScopes := insightExpectedScopeSlugs()
+	snapshotScopes := make([]string, 0, len(snapshots))
+	seenSnapshotScopes := map[string]struct{}{}
+	globalSourceMax := latestInsightCollectedAt(products)
+	for _, row := range snapshots {
+		if row.Version != version || row.SnapshotUUID == "" || row.PayloadJSON == "" || !json.Valid([]byte(row.PayloadJSON)) {
+			return fmt.Errorf("shopping insight build validation failed: invalid snapshot row")
+		}
+		if _, exists := seenSnapshotScopes[row.ScopeSlug]; exists {
+			return fmt.Errorf("shopping insight build validation failed: duplicate snapshot scope")
+		}
+		seenSnapshotScopes[row.ScopeSlug] = struct{}{}
+		snapshotScopes = append(snapshotScopes, row.ScopeSlug)
+		if row.ScopeSlug == "all" && (row.SourceProductCount != uint64(len(products)) || row.SourceMaxCollectedAt != globalSourceMax) {
+			return fmt.Errorf("shopping insight build validation failed: all-scope snapshot source parity")
+		}
+	}
+	if !sameInsightStringSet(snapshotScopes, expectedScopes) {
+		return fmt.Errorf("shopping insight build validation failed: snapshot scopes are not all plus the ten standard categories")
+	}
+
+	if len(searchRows) == 0 {
+		return fmt.Errorf("shopping insight build validation failed: empty keyword mart")
+	}
+	keywordScopes := make([]string, 0, len(expectedScopes))
+	seenKeywordScopes := map[string]struct{}{}
+	for _, row := range searchRows {
+		if row.Version != version || row.KeywordUUID == "" || row.KeywordKey == "" ||
+			!json.Valid([]byte(row.CategoriesJSON)) || !json.Valid([]byte(row.ProductsJSON)) {
+			return fmt.Errorf("shopping insight build validation failed: invalid keyword mart row")
+		}
+		if _, exists := seenKeywordScopes[row.ScopeSlug]; !exists {
+			seenKeywordScopes[row.ScopeSlug] = struct{}{}
+			keywordScopes = append(keywordScopes, row.ScopeSlug)
+		}
+		if row.ScopeSlug == "all" && (row.SourceProductCount != uint64(len(products)) || row.SourceMaxCollectedAt != globalSourceMax) {
+			return fmt.Errorf("shopping insight build validation failed: all-scope keyword source parity")
+		}
+	}
+	if !sameInsightStringSet(keywordScopes, expectedScopes) {
+		return fmt.Errorf("shopping insight build validation failed: keyword scopes are not all plus the ten standard categories")
+	}
+	return nil
+}
+
+func validateInsightRefreshVerification(products []insightProduct, snapshots []insightSnapshotInsert, searchRows []insightKeywordSearchMartInsert, version uint64, got insightRefreshVerification) error {
+	if version == 0 || got.SnapshotRows != uint64(len(snapshots)) || got.KeywordRows != uint64(len(searchRows)) {
+		return fmt.Errorf("shopping insight postcondition failed: row count mismatch")
+	}
+	expectedScopes := insightExpectedScopeSlugs()
+	if !sameInsightStringSet(got.SnapshotScopes, expectedScopes) || !sameInsightStringSet(got.KeywordScopes, expectedScopes) {
+		return fmt.Errorf("shopping insight postcondition failed: scope set mismatch")
+	}
+	if got.SnapshotInvalidPayloads != 0 || got.KeywordInvalidPayloads != 0 {
+		return fmt.Errorf("shopping insight postcondition failed: invalid JSON payload")
+	}
+	if got.SnapshotVersionMismatches != 0 || got.KeywordVersionMismatches != 0 {
+		return fmt.Errorf("shopping insight postcondition failed: generated-at version mismatch")
+	}
+	globalSourceMax := latestInsightCollectedAt(products)
+	productCount := uint64(len(products))
+	if got.SnapshotSourceMaxCollectedAt != globalSourceMax || got.KeywordSourceMaxCollectedAt != globalSourceMax ||
+		got.SnapshotSourceProductCount != productCount || got.KeywordSourceProductCount != productCount {
+		return fmt.Errorf("shopping insight postcondition failed: source version parity mismatch")
+	}
+	return nil
+}
+
+func insightExpectedScopeSlugs() []string {
+	scopes := make([]string, 0, len(insightStandardCategories)+1)
+	scopes = append(scopes, "all")
+	for _, category := range insightStandardCategories {
+		scopes = append(scopes, insightCategorySlug(category))
+	}
+	sort.Strings(scopes)
+	return scopes
+}
+
+func sameInsightStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	for i := range leftCopy {
+		if leftCopy[i] != rightCopy[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func buildInsightKeywordSearchMartScope(products []insightProduct, scopeSlug, scopeCategory, snapshotUUID, generatedText string, version uint64) []insightKeywordSearchMartInsert {
@@ -1660,6 +2027,66 @@ var insightStopwords = map[string]struct{}{
 	"공식": {}, "국내": {}, "국산": {}, "모음": {}, "수입": {}, "신선": {}, "예약": {}, "인기": {}, "증정": {}, "직구": {}, "카시오": {}, "해외": {},
 }
 
+func insightStandardCategory(category string) string {
+	category = cleanInsightText(category)
+	if category == "" {
+		return ""
+	}
+	slug := insightCategorySlug(category)
+	for _, standard := range insightStandardCategories {
+		if slug == insightCategorySlug(standard) {
+			return standard
+		}
+	}
+	switch slug {
+	case "신선식품", "가공식품", "식품-신선", "식품-가공", "간식", "간식빵", "선식-시리얼", "식용유-참기름-오일", "브로콜리-파프리카-양배추", "소시지-베이컨-하몽", "달걀-가공란", "달걀", "명란", "디저트", "오징어-낙지-문어", "국", "치즈", "코코아-밀크티-기타-차", "수입산-돼지고기-양고기", "신선하게-받아보는", "닭고기", "닭가슴살", "닭-오리고기", "밀가루-가루-믹스", "김-미역-해조류", "치킨-피자-핫도그-만두", "잡곡", "멸치-황태-다시팩", "떡볶이", "떡-한과", "초콜릿-젤리-캔디", "증류주-약주-청주", "콩나물-버섯", "두부-어묵-부침개", "아이스크림", "이유식-재료", "분유-간편-이유식", "짜장-짬뽕-파스타-면류", "피자", "친환경", "6월신상품", "7월신상품", "조미료", "소금-설탕-향신료", "회-탕류", "탕", "양념-액젓-장류", "죽-스프-카레", "구수한-집밥", "풍성하게-담은", "논알콜-무알콜", "햄-통조림-병조림", "식초-소스-드레싱", "간단히-맛보는", "찌개", "식단관리용-가공육", "집밥의발견":
+		return "식품"
+	case "생활", "주방", "생필품", "생필품-육아", "수건", "스크럽-대디":
+		return "생활/주방"
+	case "뷰티", "화장품", "립메이크업", "건강", "헬스", "여성-위생용품", "구강-면도", "프로틴":
+		return "뷰티/헬스"
+	case "패션", "패션-의류", "잡화", "가방", "신발", "운동화":
+		return "패션/잡화"
+	case "디지털", "가전", "컴퓨터", "보조배터리", "키보드", "선풍기":
+		return "디지털/가전"
+	case "가구", "홈", "홈패브릭", "책상", "테이블-식탁-책상":
+		return "가구/홈"
+	case "스포츠", "스포츠-건강", "수영":
+		return "스포츠/레저"
+	case "유아", "육아", "반려", "펫", "강아지-주식", "장난감":
+		return "유아/반려"
+	case "도서", "도서-음반", "취미-문구-펫", "문구", "취미":
+		return "도서/취미/문구"
+	case "여행", "e쿠폰", "이쿠폰", "쿠폰":
+		return "여행/e쿠폰"
+	}
+	lower := strings.ToLower(category)
+	switch {
+	case containsAny(lower, "식품", "간식", "고기", "닭", "돼지", "소고", "수산", "해조", "면류", "떡", "빵", "치즈", "우유", "분유", "이유식", "아이스크림", "초콜릿", "피자", "만두", "시리얼", "친환경", "조미료", "소스", "장류", "찌개", "탕류", "통조림"):
+		return "식품"
+	case containsAny(lower, "생활", "주방", "수건", "세제", "휴지", "스크럽"):
+		return "생활/주방"
+	case containsAny(lower, "뷰티", "헬스", "화장", "위생", "구강", "면도", "프로틴"):
+		return "뷰티/헬스"
+	case containsAny(lower, "패션", "잡화", "의류", "신발", "운동화", "가방"):
+		return "패션/잡화"
+	case containsAny(lower, "디지털", "가전", "컴퓨터", "선풍기", "키보드"):
+		return "디지털/가전"
+	case containsAny(lower, "가구", "홈", "침구", "테이블", "책상"):
+		return "가구/홈"
+	case containsAny(lower, "스포츠", "레저", "수영"):
+		return "스포츠/레저"
+	case containsAny(lower, "유아", "육아", "반려", "펫", "강아지", "고양이"):
+		return "유아/반려"
+	case containsAny(lower, "도서", "취미", "문구", "음반"):
+		return "도서/취미/문구"
+	case containsAny(lower, "여행", "쿠폰", "e쿠폰"):
+		return "여행/e쿠폰"
+	default:
+		return ""
+	}
+}
+
 func normalizeInsightCategory(provider, raw, categoryPath, searchKeyword, productName string) string {
 	raw = cleanInsightText(raw)
 	rawContext := strings.ToLower(norm.NFKC.String(strings.Join([]string{raw, categoryPath, searchKeyword}, " ")))
@@ -1689,12 +2116,12 @@ func normalizeInsightCategory(provider, raw, categoryPath, searchKeyword, produc
 		return "식품"
 	case containsAny(rawContext, "생활", "주방", "생필품", "세제", "휴지", "청소", "욕실", "세탁", "수건") || containsAny(productContext, "세제", "휴지", "티슈", "칫솔", "치약", "수건", "주방", "프라이팬", "냄비", "그릇", "청소", "욕실", "세탁"):
 		return "생활/주방"
-	case raw != "":
-		return raw
-	case searchKeyword != "":
-		return cleanInsightText(searchKeyword)
+	case insightStandardCategory(raw) != "":
+		return insightStandardCategory(raw)
+	case insightStandardCategory(searchKeyword) != "":
+		return insightStandardCategory(searchKeyword)
 	default:
-		return "미분류"
+		return ""
 	}
 }
 

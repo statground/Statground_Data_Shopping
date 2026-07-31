@@ -247,7 +247,33 @@ jobs:
           echo "ClickHouse ingestion was not visible for gmarket_run_uuid=$GMARKET_RUN_UUID and kurly_run_uuid=$KURLY_RUN_UUID within the wait window"
           exit 1
 
-      - name: Refresh Shopping Price Insight snapshot
+  refresh_insight_after_crawl:
+    if: ${{ always() && needs.crawl.result == 'success' && ((github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl')) }}
+    needs: crawl
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: shopping-price-insight-refresh
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve Go modules and checksums
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          go mod download all
+          go mod verify
+
+      - name: Build, verify, and publish Shopping Price Insight batch
         env:
           SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
@@ -421,7 +447,7 @@ jobs:
     timeout-minutes: 30
     concurrency:
       group: shopping-price-insight-refresh
-      cancel-in-progress: true
+      cancel-in-progress: false
 
     steps:
       - name: Check out repository
@@ -440,7 +466,7 @@ jobs:
           go mod download all
           go mod verify
 
-      - name: Refresh Shopping Price Insight snapshot
+      - name: Build, verify, and publish Shopping Price Insight batch
         env:
           SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
