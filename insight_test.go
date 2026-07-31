@@ -102,6 +102,66 @@ func TestInsightClickHouseJSONEmitsUnquotedInt64(t *testing.T) {
 	}
 }
 
+func TestInsightClickHouseRetriesExplicitOverload(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("Code: 202. Too many simultaneous queries (TOO_MANY_SIMULTANEOUS_QUERIES)"))
+			return
+		}
+		_, _ = w.Write([]byte("{}\n"))
+	}))
+	defer server.Close()
+
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	if _, err := client.post(context.Background(), "SELECT 1 FORMAT JSONEachRow"); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}
+
+func TestFetchInsightProductsSkipsUnclassifiedRows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(
+			`{"provider":"gmarket","product_code":"unknown","product_name":"분류 불가 상품","source_category_raw":"기타","price_krw":1000,"collected_at":"2026-08-01 00:00:00"}` + "\n" +
+				`{"provider":"gmarket","product_code":"food","product_name":"국산 양배추","source_category_raw":"신선식품","price_krw":2000,"collected_at":"2026-08-01 00:00:00"}` + "\n",
+		))
+	}))
+	defer server.Close()
+
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	products, err := client.fetchInsightProducts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(products) != 1 || products[0].ProductCode != "food" || products[0].SourceCategory != "식품" {
+		t.Fatalf("products=%#v, want only classified food row", products)
+	}
+}
+
+func TestInsightKeywordInsertUsesBoundedChunks(t *testing.T) {
+	t.Setenv("SHOPPING_INSIGHT_INSERT_CHUNK_SIZE", "2")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("Ok.\n"))
+	}))
+	defer server.Close()
+
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	rows := make([]insightKeywordSearchMartInsert, 5)
+	if err := client.insertInsightKeywordSearchMart(context.Background(), "db.table", rows); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d, want 3", requests)
+	}
+}
+
 func TestInsightCategoryAliasesCollapseToStandardScopes(t *testing.T) {
 	cases := map[string]string{
 		"떡·한과":      "식품",
@@ -173,7 +233,7 @@ func TestInsightRefreshBuildsBeforeFirstWriteAndPublishesMarkerLast(t *testing.T
 	if err := runShoppingInsightRefresh(context.Background(), client, tables); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"insert_keyword", "insert_snapshot", "verify_refresh", "insert_published", "verify_published"}
+	want := []string{"preflight", "insert_keyword", "insert_snapshot", "verify_refresh", "insert_published", "verify_published"}
 	if !sameInsightStringSet(client.calls, want) {
 		t.Fatalf("calls=%v, want members %v", client.calls, want)
 	}
@@ -201,8 +261,19 @@ func TestInsightRefreshRejectsIncompleteCategorySetBeforeWrite(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "standard") {
 		t.Fatalf("error=%v, want standard scope validation failure", err)
 	}
-	if len(client.calls) != 0 {
+	if len(client.calls) != 1 || client.calls[0] != "preflight" {
 		t.Fatalf("writes happened before complete build validation: %v", client.calls)
+	}
+}
+
+func TestInsightRefreshStopsBeforeSourceFetchWhenPublishPreflightFails(t *testing.T) {
+	client := &fakeInsightRefreshClient{products: testInsightStandardProducts(), preflightErr: fmt.Errorf("marker missing")}
+	err := runShoppingInsightRefresh(context.Background(), client, insightRefreshTables{snapshot: "snapshot", keywordSearch: "keyword", publishedBatch: "published"})
+	if err == nil || !strings.Contains(err.Error(), "preflight") {
+		t.Fatalf("error=%v, want preflight failure", err)
+	}
+	if len(client.calls) != 1 || client.calls[0] != "preflight" {
+		t.Fatalf("calls=%v, want preflight only", client.calls)
 	}
 }
 
@@ -241,6 +312,12 @@ type fakeInsightRefreshClient struct {
 	published            insightPublishedBatchInsert
 	verificationOverride *insightRefreshVerification
 	versionMismatch      bool
+	preflightErr         error
+}
+
+func (f *fakeInsightRefreshClient) preflightInsightPublishTargets(context.Context, insightRefreshTables) error {
+	f.calls = append(f.calls, "preflight")
+	return f.preflightErr
 }
 
 func (f *fakeInsightRefreshClient) fetchInsightProducts(context.Context) ([]insightProduct, error) {

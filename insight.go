@@ -309,6 +309,7 @@ type insightRefreshVerification struct {
 }
 
 type shoppingInsightRefreshClient interface {
+	preflightInsightPublishTargets(context.Context, insightRefreshTables) error
 	fetchInsightProducts(context.Context) ([]insightProduct, error)
 	insertInsightSnapshots(context.Context, string, []insightSnapshotInsert) error
 	insertInsightKeywordSearchMart(context.Context, string, []insightKeywordSearchMartInsert) error
@@ -352,9 +353,12 @@ func insightRefreshTablesFromEnv() (insightRefreshTables, error) {
 }
 
 func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefreshClient, tables insightRefreshTables) error {
+	if err := client.preflightInsightPublishTargets(ctx, tables); err != nil {
+		return fmt.Errorf("shopping insight publish preflight failed: %w", err)
+	}
 	products, err := client.fetchInsightProducts(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("shopping insight source fetch failed: %w", err)
 	}
 	if len(products) == 0 {
 		return fmt.Errorf("shopping insight refresh skipped: no current shopping products")
@@ -375,14 +379,14 @@ func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefres
 	// written first and snapshots second; neither becomes serving-authoritative
 	// until the completed-batch marker is appended after verification below.
 	if err := client.insertInsightKeywordSearchMart(ctx, tables.keywordSearch, searchRows); err != nil {
-		return err
+		return fmt.Errorf("shopping insight keyword write failed: %w", err)
 	}
 	if err := client.insertInsightSnapshots(ctx, tables.snapshot, snapshots); err != nil {
-		return err
+		return fmt.Errorf("shopping insight snapshot write failed: %w", err)
 	}
 	verification, err := client.verifyInsightRefresh(ctx, tables, version)
 	if err != nil {
-		return err
+		return fmt.Errorf("shopping insight postcondition query failed: %w", err)
 	}
 	if err := validateInsightRefreshVerification(products, snapshots, searchRows, version, verification); err != nil {
 		return err
@@ -402,12 +406,37 @@ func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefres
 		PublishedAt:          FormatCHDateTime64Millis(NowKST()),
 	}
 	if err := client.insertInsightPublishedBatch(ctx, tables.publishedBatch, batch); err != nil {
-		return err
+		return fmt.Errorf("shopping insight publish marker write failed: %w", err)
 	}
 	if err := client.verifyInsightPublishedBatch(ctx, tables.publishedBatch, batch); err != nil {
-		return err
+		return fmt.Errorf("shopping insight publish marker verification failed: %w", err)
 	}
 	fmt.Printf("Shopping Price Insight complete batch published version=%d scopes=%d products=%d table=%s keyword_search_rows=%d keyword_search_table=%s published_batch_table=%s\n", version, len(snapshots), len(products), tables.snapshot, len(searchRows), tables.keywordSearch, tables.publishedBatch)
+	return nil
+}
+
+func (c *insightCHClient) preflightInsightPublishTargets(ctx context.Context, tables insightRefreshTables) error {
+	checks := []struct {
+		name  string
+		query string
+		grant bool
+	}{
+		{name: "snapshot read", query: "SELECT scope_slug FROM " + tables.snapshot + " LIMIT 0 FORMAT JSONEachRow"},
+		{name: "keyword read", query: "SELECT scope_slug FROM " + tables.keywordSearch + " LIMIT 0 FORMAT JSONEachRow"},
+		{name: "published marker read", query: "SELECT version FROM " + tables.publishedBatch + " LIMIT 0 FORMAT JSONEachRow"},
+		{name: "snapshot insert grant", query: "CHECK GRANT INSERT ON " + tables.snapshot, grant: true},
+		{name: "keyword insert grant", query: "CHECK GRANT INSERT ON " + tables.keywordSearch, grant: true},
+		{name: "published marker insert grant", query: "CHECK GRANT INSERT ON " + tables.publishedBatch, grant: true},
+	}
+	for _, check := range checks {
+		body, err := c.post(ctx, check.query)
+		if err != nil {
+			return fmt.Errorf("%s unavailable: %w", check.name, err)
+		}
+		if check.grant && strings.TrimSpace(string(body)) != "1" {
+			return fmt.Errorf("%s denied", check.name)
+		}
+	}
 	return nil
 }
 
@@ -449,9 +478,34 @@ func firstNonEmptyEnv(names ...string) string {
 }
 
 func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) {
+	const maxOverloadAttempts = 6
+	trimmedSQL := strings.TrimSpace(strings.ToUpper(sql))
+	readOnly := strings.HasPrefix(trimmedSQL, "SELECT") || strings.HasPrefix(trimmedSQL, "WITH")
+	for attempt := 1; attempt <= maxOverloadAttempts; attempt++ {
+		body, retry, err := c.postOnce(ctx, sql, readOnly)
+		if err == nil {
+			return body, nil
+		}
+		if !retry || attempt == maxOverloadAttempts {
+			return nil, err
+		}
+		backoff := time.Duration(attempt*2) * time.Second
+		fmt.Printf("Shopping Price Insight ClickHouse temporarily unavailable; retrying attempt=%d/%d wait=%s\n", attempt+1, maxOverloadAttempts, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("clickhouse request exhausted overload retries")
+}
+
+func (c *insightCHClient) postOnce(ctx context.Context, sql string, readOnly bool) ([]byte, bool, error) {
 	endpoint, err := url.Parse(c.url)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	query := endpoint.Query()
 	// Price fields and verification counters are Int64/UInt64. Force JSONEachRow
@@ -461,19 +515,29 @@ func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) 
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(sql))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.SetBasicAuth(c.user, c.password)
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		// A write may have reached ClickHouse even when the response was lost.
+		// Do not retry ambiguous transport failures here.
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("clickhouse status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		message := strings.ToLower(string(body))
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusInternalServerError) &&
+			(strings.Contains(message, "too many simultaneous queries") || strings.Contains(message, "too_many_simultaneous_queries")) {
+			return nil, true, fmt.Errorf("clickhouse overloaded status=%d", resp.StatusCode)
+		}
+		if readOnly && resp.StatusCode == http.StatusRequestTimeout {
+			return nil, true, fmt.Errorf("clickhouse readonly query timed out status=%d", resp.StatusCode)
+		}
+		return nil, false, fmt.Errorf("clickhouse request failed status=%d", resp.StatusCode)
 	}
-	return body, nil
+	return body, false, nil
 }
 
 func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightProduct, error) {
@@ -484,6 +548,7 @@ func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightPr
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 1024), 1024*1024*10)
 	products := []insightProduct{}
+	skippedUnclassified := 0
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -514,7 +579,12 @@ func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightPr
 		category := normalizeInsightCategory(raw.Provider, raw.SourceCategoryRaw, raw.CategoryPath, raw.SearchKeyword, raw.ProductName)
 		category = insightStandardCategory(category)
 		if category == "" {
-			return nil, fmt.Errorf("shopping insight refresh rejected: product category is outside the standard scope set")
+			// New or malformed upstream category labels must not invalidate an
+			// otherwise complete all+10 publish. Exclude those rows before the
+			// build; the strict coverage and postcondition checks below still
+			// prevent publication unless every standard scope is present.
+			skippedUnclassified++
+			continue
 		}
 		p := insightProduct{
 			Provider:         raw.Provider,
@@ -541,6 +611,9 @@ func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightPr
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	if skippedUnclassified > 0 {
+		fmt.Printf("Shopping Price Insight skipped unclassified source rows=%d\n", skippedUnclassified)
 	}
 	return products, nil
 }
@@ -638,20 +711,29 @@ func (c *insightCHClient) insertInsightKeywordSearchMart(ctx context.Context, ta
 	if len(rows) == 0 {
 		return nil
 	}
-	var body strings.Builder
-	body.WriteString("INSERT INTO ")
-	body.WriteString(table)
-	body.WriteString(" FORMAT JSONEachRow\n")
-	for _, row := range rows {
-		b, err := json.Marshal(row)
-		if err != nil {
-			return err
+	chunkSize := positiveInt(envString("SHOPPING_INSIGHT_INSERT_CHUNK_SIZE", "1000"), 1000)
+	for start := 0; start < len(rows); start += chunkSize {
+		end := start + chunkSize
+		if end > len(rows) {
+			end = len(rows)
 		}
-		body.Write(b)
-		body.WriteByte('\n')
+		var body strings.Builder
+		body.WriteString("INSERT INTO ")
+		body.WriteString(table)
+		body.WriteString(" FORMAT JSONEachRow\n")
+		for _, row := range rows[start:end] {
+			b, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			body.Write(b)
+			body.WriteByte('\n')
+		}
+		if _, err := c.post(ctx, body.String()); err != nil {
+			return fmt.Errorf("keyword chunk %d-%d of %d: %w", start+1, end, len(rows), err)
+		}
 	}
-	_, err := c.post(ctx, body.String())
-	return err
+	return nil
 }
 
 func (c *insightCHClient) verifyInsightRefresh(ctx context.Context, tables insightRefreshTables, version uint64) (insightRefreshVerification, error) {
