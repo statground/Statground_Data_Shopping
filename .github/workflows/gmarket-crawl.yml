@@ -276,6 +276,8 @@ jobs:
       - name: Build, verify, and publish Shopping Price Insight batch
         env:
           SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
+          SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS: "90"
+          SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS: "10"
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
           CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
@@ -469,6 +471,8 @@ jobs:
       - name: Build, verify, and publish Shopping Price Insight batch
         env:
           SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
+          SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS: "90"
+          SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS: "10"
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
           CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}

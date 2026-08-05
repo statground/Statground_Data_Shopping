@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +25,8 @@ import (
 const defaultShoppingInsightSnapshotTable = "Data_Shopping_Service.shopping_price_insight_snapshot"
 const defaultShoppingKeywordSearchMartTable = "Data_Shopping_Service.shopping_keyword_search_mart"
 const defaultShoppingInsightPublishedBatchTable = "Data_Shopping_Service.shopping_price_insight_published_batch"
+const defaultShoppingInsightOverloadRetryAttempts = 90
+const defaultShoppingInsightOverloadRetryBackoff = 10 * time.Second
 const insightKeywordPayloadLimit = 240
 const insightCategoryKeywordPayloadLimit = 800
 const insightCategoryKeywordPerCategoryLimit = 40
@@ -34,6 +38,7 @@ const insightRangeEvidenceDealCandidateLimit = 60
 var insightSplitRe = regexp.MustCompile(`[^0-9a-zA-Z가-힣]+`)
 var insightDigitRe = regexp.MustCompile(`[0-9]`)
 var insightUUIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var insightCHCode202Re = regexp.MustCompile(`(?i)\bcode:\s*202(?:\D|$)`)
 
 var insightStandardCategories = []string{
 	"식품",
@@ -478,7 +483,14 @@ func firstNonEmptyEnv(names ...string) string {
 }
 
 func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) {
-	const maxOverloadAttempts = 6
+	maxOverloadAttempts := positiveInt(
+		envString("SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS", "90"),
+		defaultShoppingInsightOverloadRetryAttempts,
+	)
+	overloadBackoff := secondsDefault(
+		envString("SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS", "10"),
+		defaultShoppingInsightOverloadRetryBackoff,
+	)
 	trimmedSQL := strings.TrimSpace(strings.ToUpper(sql))
 	readOnly := strings.HasPrefix(trimmedSQL, "SELECT") || strings.HasPrefix(trimmedSQL, "WITH")
 	for attempt := 1; attempt <= maxOverloadAttempts; attempt++ {
@@ -489,9 +501,8 @@ func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) 
 		if !retry || attempt == maxOverloadAttempts {
 			return nil, err
 		}
-		backoff := time.Duration(attempt*2) * time.Second
-		fmt.Printf("Shopping Price Insight ClickHouse temporarily unavailable; retrying attempt=%d/%d wait=%s\n", attempt+1, maxOverloadAttempts, backoff)
-		timer := time.NewTimer(backoff)
+		fmt.Printf("Shopping Price Insight ClickHouse temporarily unavailable; retrying attempt=%d/%d wait=%s reason=%s\n", attempt+1, maxOverloadAttempts, overloadBackoff, err)
+		timer := time.NewTimer(overloadBackoff)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -499,7 +510,7 @@ func (c *insightCHClient) post(ctx context.Context, sql string) ([]byte, error) 
 		case <-timer.C:
 		}
 	}
-	return nil, fmt.Errorf("clickhouse request exhausted overload retries")
+	return nil, fmt.Errorf("clickhouse request exhausted transient retries")
 }
 
 func (c *insightCHClient) postOnce(ctx context.Context, sql string, readOnly bool) ([]byte, bool, error) {
@@ -520,17 +531,18 @@ func (c *insightCHClient) postOnce(ctx context.Context, sql string, readOnly boo
 	req.SetBasicAuth(c.user, c.password)
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if readOnly && insightClickHouseReadTransportRetryable(err) {
+			return nil, true, fmt.Errorf("clickhouse read transport failed category=temporary_network")
+		}
 		// A write may have reached ClickHouse even when the response was lost.
-		// Do not retry ambiguous transport failures here.
-		return nil, false, err
+		// Keep ambiguous writes fail-closed and never replay them automatically.
+		return nil, false, fmt.Errorf("clickhouse request transport failed")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message := strings.ToLower(string(body))
-		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusInternalServerError) &&
-			(strings.Contains(message, "too many simultaneous queries") || strings.Contains(message, "too_many_simultaneous_queries")) {
-			return nil, true, fmt.Errorf("clickhouse overloaded status=%d", resp.StatusCode)
+		if insightClickHouseQuerySlotsExhausted(resp.StatusCode, body) {
+			return nil, true, fmt.Errorf("clickhouse overloaded status=%d category=too_many_simultaneous_queries", resp.StatusCode)
 		}
 		if readOnly && resp.StatusCode == http.StatusRequestTimeout {
 			return nil, true, fmt.Errorf("clickhouse readonly query timed out status=%d", resp.StatusCode)
@@ -538,6 +550,43 @@ func (c *insightCHClient) postOnce(ctx context.Context, sql string, readOnly boo
 		return nil, false, fmt.Errorf("clickhouse request failed status=%d", resp.StatusCode)
 	}
 	return body, false, nil
+}
+
+func insightClickHouseQuerySlotsExhausted(statusCode int, body []byte) bool {
+	if statusCode != http.StatusTooManyRequests && statusCode != http.StatusInternalServerError {
+		return false
+	}
+	message := strings.ToLower(string(body))
+	return strings.Contains(message, "too many simultaneous queries") ||
+		strings.Contains(message, "too_many_simultaneous_queries") ||
+		insightCHCode202Re.Match(body)
+}
+
+func insightClickHouseReadTransportRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"connection reset",
+		"connection refused",
+		"connection aborted",
+		"broken pipe",
+		"server closed idle connection",
+		"use of closed network connection",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *insightCHClient) fetchInsightProducts(ctx context.Context) ([]insightProduct, error) {
@@ -792,7 +841,7 @@ func (c *insightCHClient) verifyInsightPublishedBatch(ctx context.Context, table
 	}
 	type markerVerification struct {
 		Rows                 uint64 `json:"rows"`
-		Version              uint64 `json:"version"`
+		Version              uint64 `json:"marker_version"`
 		GeneratedVersion     uint64 `json:"generated_version"`
 		InvalidPublishedAt   uint64 `json:"invalid_published_at"`
 		SourceMaxCollectedAt string `json:"source_max_collected_at"`
@@ -802,22 +851,7 @@ func (c *insightCHClient) verifyInsightPublishedBatch(ctx context.Context, table
 		KeywordScopeCount    uint16 `json:"keyword_scope_count"`
 		KeywordRowCount      uint64 `json:"keyword_row_count"`
 	}
-	query := fmt.Sprintf(`
-SELECT
-    count() AS rows,
-    max(version) AS version,
-    toUInt64(toUnixTimestamp64Milli(max(generated_at))) AS generated_version,
-    countIf(published_at < generated_at) AS invalid_published_at,
-    formatDateTime(max(source_max_collected_at), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') AS source_max_collected_at,
-    max(source_product_count) AS source_product_count,
-    max(expected_scope_count) AS expected_scope_count,
-    max(snapshot_scope_count) AS snapshot_scope_count,
-    max(keyword_scope_count) AS keyword_scope_count,
-    max(keyword_row_count) AS keyword_row_count
-FROM %s
-WHERE refresh_uuid = toUUID('%s')
-  AND version = %d
-FORMAT JSONEachRow`, table, expected.RefreshUUID, expected.Version)
+	query := shoppingInsightPublishedBatchVerificationSQL(table, expected)
 	body, err := c.post(ctx, query)
 	if err != nil {
 		return err
@@ -836,6 +870,25 @@ FORMAT JSONEachRow`, table, expected.RefreshUUID, expected.Version)
 		return fmt.Errorf("shopping insight published-batch marker verification failed")
 	}
 	return nil
+}
+
+func shoppingInsightPublishedBatchVerificationSQL(table string, expected insightPublishedBatchInsert) string {
+	return fmt.Sprintf(`
+SELECT
+    count() AS rows,
+    max(version) AS marker_version,
+    toUInt64(toUnixTimestamp64Milli(max(generated_at))) AS generated_version,
+    countIf(published_at < generated_at) AS invalid_published_at,
+    formatDateTime(max(source_max_collected_at), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') AS source_max_collected_at,
+    max(source_product_count) AS source_product_count,
+    max(expected_scope_count) AS expected_scope_count,
+    max(snapshot_scope_count) AS snapshot_scope_count,
+    max(keyword_scope_count) AS keyword_scope_count,
+    max(keyword_row_count) AS keyword_row_count
+FROM %s
+WHERE refresh_uuid = toUUID('%s')
+  AND version = %d
+FORMAT JSONEachRow`, table, expected.RefreshUUID, expected.Version)
 }
 
 func decodeInsightJSONEachRow(body []byte, target any) error {

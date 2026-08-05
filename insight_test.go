@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -103,6 +104,8 @@ func TestInsightClickHouseJSONEmitsUnquotedInt64(t *testing.T) {
 }
 
 func TestInsightClickHouseRetriesExplicitOverload(t *testing.T) {
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS", "3")
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS", "0.001")
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
@@ -121,6 +124,146 @@ func TestInsightClickHouseRetriesExplicitOverload(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}
+
+func TestInsightClickHouseRetriesLiveCode202UntilExhausted(t *testing.T) {
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS", "3")
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS", "0.001")
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Code: 202. DB::Exception: Too many simultaneous queries for user statground_ch_app. Current: 16, maximum: 16. (TOO_MANY_SIMULTANEOUS_QUERIES)"))
+	}))
+	defer server.Close()
+
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	_, err := client.post(context.Background(), "SELECT 1 FORMAT JSONEachRow")
+	if err == nil || !strings.Contains(err.Error(), "category=too_many_simultaneous_queries") {
+		t.Fatalf("error=%v, want sanitized query-slot exhaustion category", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts=%d, want 3", attempts)
+	}
+}
+
+func TestInsightClickHouseClassifiesCode202WithoutMessageText(t *testing.T) {
+	if !insightClickHouseQuerySlotsExhausted(http.StatusInternalServerError, []byte("Code: 202. DB::Exception")) {
+		t.Fatal("Code 202 must be classified as exhausted ClickHouse query slots")
+	}
+	if insightClickHouseQuerySlotsExhausted(http.StatusInternalServerError, []byte("Code: 60. DB::Exception")) {
+		t.Fatal("unrelated ClickHouse HTTP 500 must not be retried as query-slot exhaustion")
+	}
+	if insightClickHouseQuerySlotsExhausted(http.StatusInternalServerError, []byte("Code: 2020. DB::Exception")) {
+		t.Fatal("ClickHouse code prefix matches must not be classified as Code 202")
+	}
+}
+
+func TestInsightClickHouseRetriesReadOnlyEOF(t *testing.T) {
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS", "3")
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS", "0.001")
+	attempts := 0
+	client := &insightCHClient{
+		url:      "http://clickhouse.test",
+		user:     "user",
+		password: "password",
+		client: &http.Client{Transport: insightRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, io.EOF
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}\n")),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+	if _, err := client.post(context.Background(), "SELECT 1 FORMAT JSONEachRow"); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}
+
+func TestInsightClickHouseDoesNotRetryWriteEOF(t *testing.T) {
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS", "3")
+	t.Setenv("SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS", "0.001")
+	attempts := 0
+	client := &insightCHClient{
+		url:      "http://internal-clickhouse.example",
+		user:     "user",
+		password: "password",
+		client: &http.Client{Transport: insightRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, io.EOF
+		})},
+	}
+	_, err := client.post(context.Background(), "INSERT INTO db.table FORMAT JSONEachRow\n{}\n")
+	if err == nil || err.Error() != "clickhouse request transport failed" {
+		t.Fatalf("error=%v, want sanitized non-retryable write transport failure", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("write attempts=%d, want exactly 1", attempts)
+	}
+}
+
+func TestInsightClickHouseClassifiesReadOnlyTransientNetworkErrors(t *testing.T) {
+	for _, err := range []error{
+		io.ErrUnexpectedEOF,
+		fmt.Errorf("read tcp: connection reset by peer"),
+		insightTemporaryNetworkError{},
+	} {
+		if !insightClickHouseReadTransportRetryable(err) {
+			t.Errorf("error=%v must be classified as a retryable read-only transport failure", err)
+		}
+	}
+	if insightClickHouseReadTransportRetryable(fmt.Errorf("x509: certificate signed by unknown authority")) {
+		t.Fatal("permanent TLS configuration errors must not be retried")
+	}
+}
+
+func TestInsightPublishedBatchVerificationAvoidsVersionAliasInWhere(t *testing.T) {
+	expected := insightPublishedBatchInsert{
+		RefreshUUID:          "019fd310-acbe-7259-abe4-884ad30ad9a1",
+		Version:              1785952464934,
+		SourceMaxCollectedAt: "2026-08-05 23:36:49",
+		SourceProductCount:   32652,
+		ExpectedScopeCount:   11,
+		SnapshotScopeCount:   11,
+		KeywordScopeCount:    11,
+		KeywordRowCount:      205499,
+	}
+	query := shoppingInsightPublishedBatchVerificationSQL("Data_Shopping_Service.shopping_price_insight_published_batch", expected)
+	if strings.Contains(query, "max(version) AS version") {
+		t.Fatalf("marker verification query contains aggregate alias collision:\n%s", query)
+	}
+	if !strings.Contains(query, "max(version) AS marker_version") || !strings.Contains(query, "AND version = 1785952464934") {
+		t.Fatalf("marker verification query lost its exact version filter:\n%s", query)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if strings.Contains(string(body), "max(version) AS version") {
+			t.Errorf("live marker verification request contains aggregate alias collision:\n%s", body)
+		}
+		_, _ = fmt.Fprintf(w, `{"rows":1,"marker_version":%d,"generated_version":%d,"invalid_published_at":0,"source_max_collected_at":%q,"source_product_count":%d,"expected_scope_count":11,"snapshot_scope_count":11,"keyword_scope_count":11,"keyword_row_count":%d}`+"\n",
+			expected.Version,
+			expected.Version,
+			expected.SourceMaxCollectedAt,
+			expected.SourceProductCount,
+			expected.KeywordRowCount,
+		)
+	}))
+	defer server.Close()
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	if err := client.verifyInsightPublishedBatch(context.Background(), "Data_Shopping_Service.shopping_price_insight_published_batch", expected); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -192,6 +335,8 @@ func TestWorkflowPublishesOneSerializedBatchAfterCrawl(t *testing.T) {
 		"needs: crawl",
 		"Build, verify, and publish Shopping Price Insight batch",
 		"group: shopping-price-insight-refresh",
+		`SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS: "90"`,
+		`SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS: "10"`,
 	} {
 		if !strings.Contains(workflow, fragment) {
 			t.Fatalf("workflow missing %q", fragment)
@@ -199,6 +344,10 @@ func TestWorkflowPublishesOneSerializedBatchAfterCrawl(t *testing.T) {
 	}
 	if strings.Count(workflow, "group: shopping-price-insight-refresh") != 2 || strings.Count(workflow, "cancel-in-progress: false") != 2 {
 		t.Fatalf("insight refresh jobs must share one non-cancelling concurrency group")
+	}
+	if strings.Count(workflow, `SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS: "90"`) != 2 ||
+		strings.Count(workflow, `SHOPPING_INSIGHT_OVERLOAD_RETRY_BACKOFF_SECONDS: "10"`) != 2 {
+		t.Fatalf("both insight refresh jobs must keep the same bounded query-slot retry contract")
 	}
 }
 
@@ -314,6 +463,18 @@ type fakeInsightRefreshClient struct {
 	versionMismatch      bool
 	preflightErr         error
 }
+
+type insightRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f insightRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type insightTemporaryNetworkError struct{}
+
+func (insightTemporaryNetworkError) Error() string   { return "temporary network failure" }
+func (insightTemporaryNetworkError) Timeout() bool   { return false }
+func (insightTemporaryNetworkError) Temporary() bool { return true }
 
 func (f *fakeInsightRefreshClient) preflightInsightPublishTargets(context.Context, insightRefreshTables) error {
 	f.calls = append(f.calls, "preflight")
