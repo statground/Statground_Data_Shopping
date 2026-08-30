@@ -93,6 +93,8 @@ jobs:
       PRODUCER_IP: "::"
       CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE: "100"
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
+      CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
+      CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '0' }}
@@ -305,6 +307,8 @@ jobs:
       PRODUCER_IP: "::"
       CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE: "100"
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
+      CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
+      CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
       GMARKET_COLLECT_MODE: "random_best_categories"
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '0' }}

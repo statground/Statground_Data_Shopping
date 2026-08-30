@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -78,18 +80,20 @@ func (b *BufferedRowPublisher) flush() error {
 }
 
 type ClickHouseRawConfig struct {
-	URL              string
-	User             string
-	Password         string
-	GmarketTable     string
-	KurlyTable       string
-	InsertChunkSize  int
-	RequestTimeout   time.Duration
-	AttemptTimeout   time.Duration
-	ProducerSource   string
-	LineageTopic     string
-	LineagePartition uint32
-	LineageOffset    uint64
+	URL                   string
+	User                  string
+	Password              string
+	GmarketTable          string
+	KurlyTable            string
+	InsertChunkSize       int
+	RequestTimeout        time.Duration
+	AttemptTimeout        time.Duration
+	PreflightRetryBudget  time.Duration
+	PreflightRetryBackoff time.Duration
+	ProducerSource        string
+	LineageTopic          string
+	LineagePartition      uint32
+	LineageOffset         uint64
 }
 
 type ClickHouseRawPublisher struct {
@@ -180,19 +184,32 @@ func NewClickHouseRawPublisherFromEnv() (*ClickHouseRawPublisher, error) {
 	}
 
 	timeout := secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS", envString("CLICKHOUSE_REQUEST_TIMEOUT_SECONDS", "120")), 120*time.Second)
+	preflightBudget := secondsDefault(envString("CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS", "90"), 90*time.Second)
+	if preflightBudget <= 0 || preflightBudget > 10*time.Minute {
+		preflightBudget = 90 * time.Second
+	}
+	preflightBackoff := secondsDefault(envString("CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS", "5"), 5*time.Second)
+	if preflightBackoff <= 0 || preflightBackoff > 30*time.Second {
+		preflightBackoff = 5 * time.Second
+	}
+	if preflightBackoff > preflightBudget {
+		preflightBackoff = preflightBudget
+	}
 	cfg := ClickHouseRawConfig{
-		URL:              fmt.Sprintf("%s://%s:%s%s", protocol, host, port, path),
-		User:             user,
-		Password:         password,
-		GmarketTable:     gmarketTable,
-		KurlyTable:       kurlyTable,
-		InsertChunkSize:  positiveInt(envString("CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE", "100"), 100),
-		RequestTimeout:   timeout,
-		AttemptTimeout:   secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS", "30"), 30*time.Second),
-		ProducerSource:   envString("PRODUCER_SOURCE", "github_actions"),
-		LineageTopic:     envString("CLICKHOUSE_DIRECT_LINEAGE_TOPIC", "direct_clickhouse"),
-		LineagePartition: 0,
-		LineageOffset:    0,
+		URL:                   fmt.Sprintf("%s://%s:%s%s", protocol, host, port, path),
+		User:                  user,
+		Password:              password,
+		GmarketTable:          gmarketTable,
+		KurlyTable:            kurlyTable,
+		InsertChunkSize:       positiveInt(envString("CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE", "100"), 100),
+		RequestTimeout:        timeout,
+		AttemptTimeout:        secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS", "30"), 30*time.Second),
+		PreflightRetryBudget:  preflightBudget,
+		PreflightRetryBackoff: preflightBackoff,
+		ProducerSource:        envString("PRODUCER_SOURCE", "github_actions"),
+		LineageTopic:          envString("CLICKHOUSE_DIRECT_LINEAGE_TOPIC", "direct_clickhouse"),
+		LineagePartition:      0,
+		LineageOffset:         0,
 	}
 	return &ClickHouseRawPublisher{
 		cfg:    cfg,
@@ -205,26 +222,102 @@ func PreflightClickHouseDirectFromEnv(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var connectErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if connectErr = pub.exec(ctx, "SELECT 1"); connectErr == nil {
-			break
-		}
-		if attempt < 3 {
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
-		}
-	}
+	retryCtx, cancel := context.WithTimeout(ctx, pub.cfg.PreflightRetryBudget)
+	defer cancel()
+	attempts, connectErr := pub.retryPreflightSQL(retryCtx, "SELECT 1")
 	if connectErr != nil {
-		return fmt.Errorf("clickhouse direct preflight failed to connect after 3 attempts: %w", connectErr)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("clickhouse direct preflight failed to connect after %d attempts: %w", attempts, connectErr)
 	}
-	if err := pub.exec(ctx, "CHECK GRANT INSERT ON "+pub.cfg.GmarketTable); err != nil {
-		return fmt.Errorf("clickhouse direct preflight missing Gmarket raw insert grant: %w", err)
+	if attempts, err = pub.retryPreflightSQL(retryCtx, "CHECK GRANT INSERT ON "+pub.cfg.GmarketTable); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("clickhouse direct preflight missing Gmarket raw insert grant after %d attempts: %w", attempts, err)
 	}
-	if err := pub.exec(ctx, "CHECK GRANT INSERT ON "+pub.cfg.KurlyTable); err != nil {
-		return fmt.Errorf("clickhouse direct preflight missing Kurly raw insert grant: %w", err)
+	if attempts, err = pub.retryPreflightSQL(retryCtx, "CHECK GRANT INSERT ON "+pub.cfg.KurlyTable); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("clickhouse direct preflight missing Kurly raw insert grant after %d attempts: %w", attempts, err)
 	}
 	fmt.Printf("[clickhouse] direct preflight ok gmarket_table=%s kurly_table=%s\n", pub.cfg.GmarketTable, pub.cfg.KurlyTable)
 	return nil
+}
+
+func (p *ClickHouseRawPublisher) retryPreflightSQL(ctx context.Context, sql string) (int, error) {
+	return retryClickHousePreflight(ctx, p.cfg.PreflightRetryBackoff, func(attemptCtx context.Context) error {
+		requestCtx, cancel := context.WithTimeout(attemptCtx, p.cfg.AttemptTimeout)
+		defer cancel()
+		return p.exec(requestCtx, sql)
+	})
+}
+
+func retryClickHousePreflight(ctx context.Context, backoff time.Duration, operation func(context.Context) error) (int, error) {
+	if backoff <= 0 {
+		backoff = 5 * time.Second
+	}
+	attempts := 0
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return attempts, lastErr
+			}
+			return attempts, err
+		}
+		attempts++
+		lastErr = operation(ctx)
+		if lastErr == nil || !isRetryableClickHousePreflightError(lastErr) {
+			return attempts, lastErr
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return attempts, lastErr
+		case <-timer.C:
+		}
+	}
+}
+
+func isRetryableClickHousePreflightError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"status=400", "status=401", "status=403", "status=404",
+		"authentication", "wrong password", "access denied", "not enough privileges",
+		"unknown table", "unknown database", "unknown identifier", "unknown column",
+		"does not exist", "syntax error", "cannot parse", "type mismatch",
+	} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"connection refused", "connection reset", "connection aborted", "broken pipe",
+		"no route to host", "network is unreachable", "unexpected eof", "timeout", "deadline",
+		"status=408", "status=429", "status=500", "status=502", "status=503", "status=504",
+		"not initialized", "readonly", "read-only", "keeper", "coordination",
+		"query was cancelled", "too many simultaneous queries", "too many pending queries",
+		"memory limit exceeded", "too many parts", "temporarily unavailable",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *ClickHouseRawPublisher) InsertGmarketRows(ctx context.Context, rows []Row, runUUID string) error {
