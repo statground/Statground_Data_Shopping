@@ -4,13 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "crawl for 6-hour list snapshot, detail_enrich for matrix detail enrichment"
+        description: "crawl, detail_enrich, or manual bounded raw_outbox_replay"
         required: false
         default: "crawl"
         type: choice
         options:
           - crawl
           - detail_enrich
+          - raw_outbox_replay
+      raw_outbox_replay_limit:
+        description: "Pending raw batches to replay once; default 25, hard cap 100"
+        required: false
+        default: 25
+        type: number
       collect_mode:
         description: "random_best_categories, search_keywords, or from_excel"
         required: false
@@ -78,14 +84,111 @@ on:
 permissions:
   contents: read
 
+# One workflow run may retain its internal detail matrix parallelism, but no
+# other writer or manual outbox replay run may overlap it against the shared
+# endpoint-local tables.
+concurrency:
+  group: statground-shopping-clickhouse-writer-replayer
+  cancel-in-progress: false
+
+env:
+  CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"
+  CLICKHOUSE_PRESSURE_GATE_MAX_USED_RATIO: "0.90"
+  CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_INODES: "1000000"
+  CLICKHOUSE_PRESSURE_GATE_MAX_USED_INODE_RATIO: "0.95"
+  CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_QUEUE: "2000"
+  CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_DELAY_SECONDS: "900"
+  CLICKHOUSE_PRESSURE_GATE_MAX_IOWAIT_NORMALIZED: "0.50"
+  CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: "15"
+
 jobs:
+  raw_outbox_replay:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'raw_outbox_replay' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: gmarket-shopping-raw-outbox-replay
+      cancel-in-progress: false
+
+    env:
+      INGEST_MODE: clickhouse
+      SHOPPING_RAW_OUTBOX_REPLAY_ONLY: "true"
+      SHOPPING_RAW_OUTBOX_REPLAY_ENABLED: "true"
+      SHOPPING_RAW_OUTBOX_REPLAY_LIMIT: ${{ github.event.inputs.raw_outbox_replay_limit || '25' }}
+      CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
+      CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS || '30' }}
+      CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
+      CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
+      CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate required repository secrets
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: |
+          test -n "$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_HOST secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PORT" || { echo "CLICKHOUSE_PORT secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME repository variable or secret is required"; exit 1; }
+          [[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME is unsafe"; exit 1; }
+          [[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME must identify one server, not a gateway"; exit 1; }
+
+      - name: Resolve Go modules and checksums
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          go mod download all
+          go mod verify
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Gate ClickHouse writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,
+            local:Data_Shopping_Raw.kurly_product_raw_endpoint_history,
+            local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: python3 scripts/clickhouse_pressure_gate.py
+
+      - name: Replay bounded Shopping raw outbox
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: go run .
+
   crawl:
     if: ${{ (github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     concurrency:
       group: gmarket-shopping-crawl-list
-      cancel-in-progress: true
+      cancel-in-progress: false
 
     env:
       INGEST_MODE: clickhouse
@@ -95,6 +198,7 @@ jobs:
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
       CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
       CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
+      CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}
       GMARKET_COLLECT_MODE: ${{ github.event.inputs.collect_mode || 'random_best_categories' }}
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '0' }}
@@ -179,6 +283,9 @@ jobs:
           test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
           test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME repository variable or secret is required"; exit 1; }
+          [[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME is unsafe"; exit 1; }
+          [[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME must identify one server, not a gateway"; exit 1; }
           if [[ "${CLICKHOUSE_PROTOCOL,,}" != "https" ]]; then
             echo "::warning::ClickHouse transport is not TLS-protected; configure CLICKHOUSE_PROTOCOL=https with certificate verification"
           fi
@@ -192,6 +299,20 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Gate ClickHouse writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,
+            local:Data_Shopping_Raw.kurly_product_raw_endpoint_history,
+            local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Run crawler
         env:
@@ -275,6 +396,20 @@ jobs:
           go mod download all
           go mod verify
 
+      - name: Gate ClickHouse writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Service.shopping_price_insight_snapshot,
+            local:Data_Shopping_Service.shopping_keyword_search_mart,
+            local:Data_Shopping_Service.shopping_price_insight_published_batch
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: python3 scripts/clickhouse_pressure_gate.py
+
       - name: Build, verify, and publish Shopping Price Insight batch
         env:
           SHOPPING_ANALYSIS_REFRESH_ONLY: "true"
@@ -294,7 +429,7 @@ jobs:
     timeout-minutes: 300
     concurrency:
       group: gmarket-shopping-crawl-detail-${{ matrix.shard_index }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -309,6 +444,7 @@ jobs:
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
       CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
       CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
+      CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}
       GMARKET_COLLECT_MODE: "random_best_categories"
       GMARKET_TOTAL_TARGET_PRODUCTS: ${{ github.event.inputs.detail_total_target_products || '0' }}
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '0' }}
@@ -382,6 +518,9 @@ jobs:
           test -n "$CLICKHOUSE_PROTOCOL" || { echo "CLICKHOUSE_PROTOCOL secret is required"; exit 1; }
           test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
           test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME repository variable or secret is required"; exit 1; }
+          [[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME is unsafe"; exit 1; }
+          [[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME must identify one server, not a gateway"; exit 1; }
 
       - name: Resolve Go modules and checksums
         env:
@@ -392,6 +531,19 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Gate ClickHouse writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,
+            local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Run detail enrichment shard
         env:
@@ -471,6 +623,20 @@ jobs:
         run: |
           go mod download all
           go mod verify
+
+      - name: Gate ClickHouse writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Service.shopping_price_insight_snapshot,
+            local:Data_Shopping_Service.shopping_keyword_search_mart,
+            local:Data_Shopping_Service.shopping_price_insight_published_batch
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+        run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Build, verify, and publish Shopping Price Insight batch
         env:

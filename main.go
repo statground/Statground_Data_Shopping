@@ -3383,7 +3383,10 @@ func RunGmarketCollection(rootCtx context.Context) {
 
 	resultRows := MergeRows(listRows, detailRows)
 	if streamPublishErr != nil {
-		fmt.Printf("[ingest] Gmarket streaming ingest failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
+		if !shouldRetryStreamingPublish(streamPublishErr) {
+			panic(streamPublishErr)
+		}
+		fmt.Printf("[ingest] Gmarket streaming ingest failed; retrying confirmed-unaccepted failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
 		if streamPublisher == nil {
 			panic(streamPublishErr)
 		}
@@ -3403,6 +3406,23 @@ func RunGmarketCollection(rootCtx context.Context) {
 func main() {
 	ApplyEnvConfig()
 	ApplyKurlyEnvConfig()
+	if envBool("SHOPPING_RAW_OUTBOX_REPLAY_ONLY", false) {
+		if !ShouldWriteClickHouse() {
+			fmt.Println("Shopping raw outbox replay requires INGEST_MODE=clickhouse")
+			os.Exit(1)
+		}
+		if !envBool("SHOPPING_RAW_OUTBOX_REPLAY_ENABLED", false) {
+			fmt.Println("Shopping raw outbox replay requires SHOPPING_RAW_OUTBOX_REPLAY_ENABLED=true")
+			os.Exit(1)
+		}
+		fmt.Println("Shopping raw ClickHouse outbox bounded replay started")
+		if err := PreflightClickHouseDirectFromEnv(context.Background()); err != nil {
+			fmt.Println("Shopping raw ClickHouse outbox replay failed:", shortIngestError(err))
+			os.Exit(1)
+		}
+		fmt.Println("Shopping raw ClickHouse outbox bounded replay completed")
+		return
+	}
 
 	if envBool("SHOPPING_ANALYSIS_REFRESH_ONLY", false) {
 		if err := RunShoppingInsightRefreshFromEnv(context.Background()); err != nil {

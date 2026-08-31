@@ -149,7 +149,10 @@ func RunKurlyCollection(ctx context.Context) {
 		fmt.Println("상세 수집 상품 수:", len(detailRows))
 		fmt.Println("====================================")
 		if streamPublishErr != nil {
-			fmt.Printf("[ingest] Kurly streaming ingest failed; retrying failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
+			if !shouldRetryStreamingPublish(streamPublishErr) {
+				panic(streamPublishErr)
+			}
+			fmt.Printf("[ingest] Kurly streaming ingest failed; retrying confirmed-unaccepted failed_rows=%d error=%s\n", len(streamFailedRows), shortIngestError(streamPublishErr))
 			if streamPublisher == nil {
 				panic(streamPublishErr)
 			}

@@ -342,7 +342,7 @@ func TestWorkflowPublishesOneSerializedBatchAfterCrawl(t *testing.T) {
 			t.Fatalf("workflow missing %q", fragment)
 		}
 	}
-	if strings.Count(workflow, "group: shopping-price-insight-refresh") != 2 || strings.Count(workflow, "cancel-in-progress: false") != 2 {
+	if strings.Count(workflow, "group: shopping-price-insight-refresh") != 2 || strings.Count(workflow, "cancel-in-progress: false") < 2 {
 		t.Fatalf("insight refresh jobs must share one non-cancelling concurrency group")
 	}
 	if strings.Count(workflow, `SHOPPING_INSIGHT_OVERLOAD_RETRY_ATTEMPTS: "90"`) != 2 ||

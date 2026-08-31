@@ -133,6 +133,49 @@ func TestClickHouseRawRowSkipsUnknownRawRowAndKeepsPayload(t *testing.T) {
 	}
 }
 
+func TestClickHouseCanonicalRawDigestPreservesTestgoProducerSource(t *testing.T) {
+	payload := map[string]any{
+		"uuid":         "018f0000-0000-7000-8000-000000000011",
+		"provider":     "gmarket",
+		"product_code": "testgo-product",
+	}
+	testgoPublisher := ClickHouseRawPublisher{cfg: ClickHouseRawConfig{
+		ProducerSource: "testgo",
+		LineageTopic:   "direct_clickhouse",
+	}}
+	testgoRow, err := testgoPublisher.buildRawRow(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testgoRow["event_uuid"] = "01900000-0000-7000-8000-000000000044"
+	if testgoRow["source"] != "testgo" {
+		t.Fatalf("producer source=%v, want testgo", testgoRow["source"])
+	}
+	if _, exists := testgoRow["source_env"]; exists {
+		t.Fatalf("unexpected source_env column in raw row: %#v", testgoRow)
+	}
+
+	productionRow := make(clickHouseRawRow, len(testgoRow))
+	for key, value := range testgoRow {
+		productionRow[key] = value
+	}
+	productionRow["source"] = "github_actions"
+	testgoBatches, err := canonicalRawBatches(defaultGmarketRawInsertTable, []clickHouseRawRow{testgoRow}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionBatches, err := canonicalRawBatches(defaultGmarketRawInsertTable, []clickHouseRawRow{productionRow}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if testgoBatches[0].token == productionBatches[0].token {
+		t.Fatal("canonical raw token ignored the existing source lineage field")
+	}
+	if !strings.Contains(testgoBatches[0].rowsJSON, `"source":"testgo"`) {
+		t.Fatalf("canonical testgo payload lost source lineage: %s", testgoBatches[0].rowsJSON)
+	}
+}
+
 func TestKurlyExtractProductRowsFromSearchJSON(t *testing.T) {
 	data := map[string]any{
 		"data": []any{

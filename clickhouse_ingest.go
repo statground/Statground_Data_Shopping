@@ -1,22 +1,37 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	defaultGmarketRawInsertTable = "Data_Shopping_Raw.gmarket_product_raw_endpoint_history"
-	defaultKurlyRawInsertTable   = "Data_Shopping_Raw.kurly_product_raw_endpoint_history"
+	defaultGmarketRawInsertTable  = "Data_Shopping_Raw.gmarket_product_raw_endpoint_history"
+	defaultKurlyRawInsertTable    = "Data_Shopping_Raw.kurly_product_raw_endpoint_history"
+	defaultShoppingRawOutboxTable = "Data_Shopping_Log.shopping_raw_direct_insert_outbox"
+)
+
+const (
+	minimumEndpointDeduplicationWindow       = 1000
+	maximumDirectEndpointHostnameBytes       = 253
+	maximumDirectEndpointHostnameResultBytes = maximumDirectEndpointHostnameBytes + 1
+)
+
+var (
+	endpointDeduplicationWindowPattern = regexp.MustCompile(`(?i)non_replicated_deduplication_window\s*=\s*([0-9]+)`)
+	directEndpointHostnamePattern      = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$`)
+	errDirectEndpointHostnameMismatch  = errors.New("clickhouse direct endpoint hostname mismatch")
 )
 
 type RowPublisher interface {
@@ -52,12 +67,19 @@ func (b *BufferedRowPublisher) Flush() error {
 	if len(b.pending) == 0 {
 		return b.lastErr
 	}
+	if b.lastErr != nil && !shouldRetryStreamingPublish(b.lastErr) {
+		return b.lastErr
+	}
 	if err := b.flush(); err != nil {
 		b.lastErr = err
 		return err
 	}
 	b.lastErr = nil
 	return nil
+}
+
+func shouldRetryStreamingPublish(err error) bool {
+	return err != nil && !isAmbiguousRawInsertError(err) && !errors.Is(err, errDirectEndpointHostnameMismatch)
 }
 
 func (b *BufferedRowPublisher) PendingRows() []Row {
@@ -80,25 +102,31 @@ func (b *BufferedRowPublisher) flush() error {
 }
 
 type ClickHouseRawConfig struct {
-	URL                   string
-	User                  string
-	Password              string
-	GmarketTable          string
-	KurlyTable            string
-	InsertChunkSize       int
-	RequestTimeout        time.Duration
-	AttemptTimeout        time.Duration
-	PreflightRetryBudget  time.Duration
-	PreflightRetryBackoff time.Duration
-	ProducerSource        string
-	LineageTopic          string
-	LineagePartition      uint32
-	LineageOffset         uint64
+	URL                    string
+	User                   string
+	Password               string
+	DirectEndpointHostname string
+	GmarketTable           string
+	KurlyTable             string
+	OutboxTable            string
+	OutboxReplayEnabled    bool
+	OutboxReplayLimit      int
+	InsertChunkSize        int
+	RequestTimeout         time.Duration
+	AttemptTimeout         time.Duration
+	PreflightRetryBudget   time.Duration
+	PreflightRetryBackoff  time.Duration
+	ProducerSource         string
+	LineageTopic           string
+	LineagePartition       uint32
+	LineageOffset          uint64
 }
 
 type ClickHouseRawPublisher struct {
-	cfg    ClickHouseRawConfig
-	client *http.Client
+	cfg                      ClickHouseRawConfig
+	client                   *http.Client
+	endpointIdentityMu       sync.Mutex
+	endpointIdentityVerified bool
 }
 
 type clickHouseRawRow map[string]any
@@ -173,6 +201,10 @@ func NewClickHouseRawPublisherFromEnv() (*ClickHouseRawPublisher, error) {
 	if host == "" || port == "" || user == "" || password == "" {
 		return nil, fmt.Errorf("missing ClickHouse env: CLICKHOUSE_HOST/PORT/USER/PASSWORD")
 	}
+	directEndpointHostname, err := directEndpointHostnameFromEnv()
+	if err != nil {
+		return nil, err
+	}
 
 	gmarketTable := safeInsightIdentifierPath(envString("SHOPPING_GMARKET_RAW_INSERT_TABLE", defaultGmarketRawInsertTable))
 	if gmarketTable == "" {
@@ -181,6 +213,10 @@ func NewClickHouseRawPublisherFromEnv() (*ClickHouseRawPublisher, error) {
 	kurlyTable := safeInsightIdentifierPath(envString("SHOPPING_KURLY_RAW_INSERT_TABLE", defaultKurlyRawInsertTable))
 	if kurlyTable == "" {
 		return nil, fmt.Errorf("invalid SHOPPING_KURLY_RAW_INSERT_TABLE")
+	}
+	outboxTable := safeInsightIdentifierPath(envString("SHOPPING_RAW_DIRECT_OUTBOX_TABLE", defaultShoppingRawOutboxTable))
+	if outboxTable == "" {
+		return nil, fmt.Errorf("invalid SHOPPING_RAW_DIRECT_OUTBOX_TABLE")
 	}
 
 	timeout := secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS", envString("CLICKHOUSE_REQUEST_TIMEOUT_SECONDS", "120")), 120*time.Second)
@@ -196,25 +232,73 @@ func NewClickHouseRawPublisherFromEnv() (*ClickHouseRawPublisher, error) {
 		preflightBackoff = preflightBudget
 	}
 	cfg := ClickHouseRawConfig{
-		URL:                   fmt.Sprintf("%s://%s:%s%s", protocol, host, port, path),
-		User:                  user,
-		Password:              password,
-		GmarketTable:          gmarketTable,
-		KurlyTable:            kurlyTable,
-		InsertChunkSize:       positiveInt(envString("CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE", "100"), 100),
-		RequestTimeout:        timeout,
-		AttemptTimeout:        secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS", "30"), 30*time.Second),
-		PreflightRetryBudget:  preflightBudget,
-		PreflightRetryBackoff: preflightBackoff,
-		ProducerSource:        envString("PRODUCER_SOURCE", "github_actions"),
-		LineageTopic:          envString("CLICKHOUSE_DIRECT_LINEAGE_TOPIC", "direct_clickhouse"),
-		LineagePartition:      0,
-		LineageOffset:         0,
+		URL:                    fmt.Sprintf("%s://%s:%s%s", protocol, host, port, path),
+		User:                   user,
+		Password:               password,
+		DirectEndpointHostname: directEndpointHostname,
+		GmarketTable:           gmarketTable,
+		KurlyTable:             kurlyTable,
+		OutboxTable:            outboxTable,
+		OutboxReplayEnabled:    envBool("SHOPPING_RAW_OUTBOX_REPLAY_ENABLED", false),
+		OutboxReplayLimit:      boundedRawInt(envString("SHOPPING_RAW_OUTBOX_REPLAY_LIMIT", "25"), 25, 1, maxRawOutboxReplayRows),
+		InsertChunkSize:        boundedRawInt(envString("CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE", "100"), 100, 1, maxRawOutboxRows),
+		RequestTimeout:         timeout,
+		AttemptTimeout:         secondsDefault(envString("CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS", "30"), 30*time.Second),
+		PreflightRetryBudget:   preflightBudget,
+		PreflightRetryBackoff:  preflightBackoff,
+		ProducerSource:         envString("PRODUCER_SOURCE", "github_actions"),
+		LineageTopic:           envString("CLICKHOUSE_DIRECT_LINEAGE_TOPIC", "direct_clickhouse"),
+		LineagePartition:       0,
+		LineageOffset:          0,
 	}
 	return &ClickHouseRawPublisher{
 		cfg:    cfg,
 		client: &http.Client{Timeout: timeout},
 	}, nil
+}
+
+func directEndpointHostnameFromEnv() (string, error) {
+	raw, present := os.LookupEnv("CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME")
+	if !present || raw == "" {
+		return "", fmt.Errorf("missing ClickHouse env: CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME")
+	}
+	if raw != strings.TrimSpace(raw) || !validDirectEndpointHostname(raw) {
+		return "", fmt.Errorf("invalid CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME")
+	}
+	return raw, nil
+}
+
+func validDirectEndpointHostname(hostname string) bool {
+	return len(hostname) > 0 &&
+		len(hostname) <= maximumDirectEndpointHostnameBytes &&
+		directEndpointHostnamePattern.MatchString(hostname) &&
+		!strings.Contains(strings.ToLower(hostname), "gateway")
+}
+
+func (p *ClickHouseRawPublisher) ensureDirectEndpointIdentity(ctx context.Context) error {
+	if p == nil || p.client == nil || !validDirectEndpointHostname(p.cfg.DirectEndpointHostname) {
+		return fmt.Errorf("invalid clickhouse direct endpoint identity configuration: %w", errDirectEndpointHostnameMismatch)
+	}
+	p.endpointIdentityMu.Lock()
+	defer p.endpointIdentityMu.Unlock()
+	if p.endpointIdentityVerified {
+		return nil
+	}
+	attempts, err := retryClickHousePreflight(ctx, p.cfg.PreflightRetryBackoff, func(attemptCtx context.Context) error {
+		body, queryErr := p.queryBody(attemptCtx, "SELECT hostName() FORMAT TabSeparatedRaw", maximumDirectEndpointHostnameResultBytes)
+		if queryErr != nil {
+			return queryErr
+		}
+		if string(body) != p.cfg.DirectEndpointHostname+"\n" {
+			return errDirectEndpointHostnameMismatch
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("clickhouse direct endpoint identity failed after %d attempts: %w", attempts, err)
+	}
+	p.endpointIdentityVerified = true
+	return nil
 }
 
 func PreflightClickHouseDirectFromEnv(ctx context.Context) error {
@@ -224,6 +308,12 @@ func PreflightClickHouseDirectFromEnv(ctx context.Context) error {
 	}
 	retryCtx, cancel := context.WithTimeout(ctx, pub.cfg.PreflightRetryBudget)
 	defer cancel()
+	if err := pub.ensureDirectEndpointIdentity(retryCtx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("clickhouse direct preflight endpoint identity rejected: %w", err)
+	}
 	attempts, connectErr := pub.retryPreflightSQL(retryCtx, "SELECT 1")
 	if connectErr != nil {
 		if ctx.Err() != nil {
@@ -243,8 +333,82 @@ func PreflightClickHouseDirectFromEnv(ctx context.Context) error {
 		}
 		return fmt.Errorf("clickhouse direct preflight missing Kurly raw insert grant after %d attempts: %w", attempts, err)
 	}
-	fmt.Printf("[clickhouse] direct preflight ok gmarket_table=%s kurly_table=%s\n", pub.cfg.GmarketTable, pub.cfg.KurlyTable)
+	for _, target := range []struct {
+		name  string
+		table string
+	}{
+		{name: "Gmarket raw", table: pub.cfg.GmarketTable},
+		{name: "Kurly raw", table: pub.cfg.KurlyTable},
+	} {
+		if attempts, err = pub.retryEndpointDeduplicationSetting(retryCtx, target.table); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("clickhouse direct preflight invalid %s deduplication setting after %d attempts: %w", target.name, attempts, err)
+		}
+	}
+	for _, target := range []struct {
+		name  string
+		table string
+	}{
+		{name: "Gmarket raw read", table: pub.cfg.GmarketTable},
+		{name: "Kurly raw read", table: pub.cfg.KurlyTable},
+	} {
+		if attempts, err = pub.retryPreflightSQL(retryCtx, "CHECK GRANT SELECT ON "+target.table); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("clickhouse direct preflight missing %s grant after %d attempts: %w", target.name, attempts, err)
+		}
+	}
+	for _, privilege := range []string{"SELECT", "INSERT", "ALTER UPDATE"} {
+		if attempts, err = pub.retryPreflightSQL(retryCtx, "CHECK GRANT "+privilege+" ON "+pub.cfg.OutboxTable); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("clickhouse direct preflight missing raw outbox %s grant after %d attempts: %w", privilege, attempts, err)
+		}
+	}
+	if attempts, err = pub.retryPreflightSQL(retryCtx, "SELECT 1 FROM "+pub.cfg.OutboxTable+" LIMIT 0"); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("clickhouse direct preflight raw outbox unavailable after %d attempts: %w", attempts, err)
+	}
+	fmt.Printf("[clickhouse] direct preflight ok gmarket_table=%s kurly_table=%s outbox_table=%s\n", pub.cfg.GmarketTable, pub.cfg.KurlyTable, pub.cfg.OutboxTable)
+	if pub.cfg.OutboxReplayEnabled {
+		if err := pub.replayRawOutbox(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (p *ClickHouseRawPublisher) retryEndpointDeduplicationSetting(ctx context.Context, table string) (int, error) {
+	if !validRawTableIdentifier(table) {
+		return 0, fmt.Errorf("invalid endpoint history table")
+	}
+	return retryClickHousePreflight(ctx, p.cfg.PreflightRetryBackoff, func(attemptCtx context.Context) error {
+		requestCtx, cancel := context.WithTimeout(attemptCtx, p.cfg.AttemptTimeout)
+		defer cancel()
+		body, err := p.queryBody(requestCtx, "SHOW CREATE TABLE "+table+" FORMAT TabSeparatedRaw", maxRawOutboxHeaderBytes)
+		if err != nil {
+			return err
+		}
+		definition := string(body)
+		if !regexp.MustCompile(`(?i)ENGINE\s*=\s*MergeTree(?:\(\))?`).MatchString(definition) {
+			return fmt.Errorf("endpoint history must use non-replicated MergeTree")
+		}
+		matches := endpointDeduplicationWindowPattern.FindStringSubmatch(definition)
+		if len(matches) != 2 {
+			return fmt.Errorf("endpoint history is missing non_replicated_deduplication_window")
+		}
+		window, parseErr := strconv.Atoi(matches[1])
+		if parseErr != nil || window < minimumEndpointDeduplicationWindow {
+			return fmt.Errorf("endpoint history deduplication window is below %d", minimumEndpointDeduplicationWindow)
+		}
+		return nil
+	})
 }
 
 func (p *ClickHouseRawPublisher) retryPreflightSQL(ctx context.Context, sql string) (int, error) {
@@ -293,6 +457,28 @@ func isRetryableClickHousePreflightError(err error) bool {
 	var networkErr net.Error
 	if errors.As(err, &networkErr) {
 		return true
+	}
+	var statusErr *clickHouseHTTPStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.code {
+		case 6, 27, 47, 60, 62, 81, 497, 516:
+			return false
+		case 159, 164, 202, 203, 209, 210, 225, 241, 242, 243, 244, 252, 254, 255,
+			265, 279, 285, 286, 289, 297, 319, 364, 369, 384, 394, 410, 415, 416,
+			425, 439, 473, 519, 574, 667, 677, 692, 700, 722, 733, 734, 735, 738,
+			745, 749, 762, 999:
+			return true
+		}
+		switch statusErr.status {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return false
+		case http.StatusRequestTimeout, http.StatusTooManyRequests,
+			http.StatusInternalServerError, http.StatusBadGateway,
+			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
 	}
 	message := strings.ToLower(err.Error())
 	for _, marker := range []string{
@@ -401,71 +587,16 @@ func (p *ClickHouseRawPublisher) buildRawRow(payload map[string]any) (clickHouse
 }
 
 func (p *ClickHouseRawPublisher) insertJSONEachRow(ctx context.Context, table string, rows []clickHouseRawRow) error {
-	chunkSize := p.cfg.InsertChunkSize
-	if chunkSize <= 0 {
-		chunkSize = len(rows)
+	batches, err := canonicalRawBatches(table, rows, p.cfg.InsertChunkSize)
+	if err != nil {
+		return fmt.Errorf("clickhouse direct insert payload rejected: %w", err)
 	}
-	for start := 0; start < len(rows); start += chunkSize {
-		end := start + chunkSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-		if err := p.insertJSONEachRowChunk(ctx, table, rows[start:end]); err != nil {
-			return fmt.Errorf("clickhouse direct insert failed offset=%d size=%d total=%d: %w", start, end-start, len(rows), err)
+	for index, batch := range batches {
+		if err := p.insertRawBatchWithOutbox(ctx, table, batch); err != nil {
+			return fmt.Errorf("clickhouse direct insert failed chunk=%d rows=%d total=%d: %w", index, batch.rowCount, len(rows), err)
 		}
 	}
 	return nil
-}
-
-func (p *ClickHouseRawPublisher) insertJSONEachRowChunk(ctx context.Context, table string, rows []clickHouseRawRow) error {
-	var body bytes.Buffer
-	body.WriteString("INSERT INTO ")
-	body.WriteString(table)
-	payload := bytes.Buffer{}
-	for _, row := range rows {
-		line, err := json.Marshal(row)
-		if err != nil {
-			return err
-		}
-		payload.Write(line)
-		payload.WriteByte('\n')
-	}
-	token := fmt.Sprintf("%x", sha256.Sum256(append([]byte(table+"\x1f"), payload.Bytes()...)))
-	body.WriteString(" SETTINGS insert_deduplicate = 1, insert_deduplication_token = '")
-	body.WriteString(token)
-	body.WriteString("' FORMAT JSONEachRow\n")
-	body.Write(payload.Bytes())
-	bodyBytes := body.Bytes()
-	var lastErr error
-	for attempt := 1; attempt <= 2; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, p.cfg.AttemptTimeout)
-		req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, p.cfg.URL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			cancel()
-			return err
-		}
-		req.SetBasicAuth(p.cfg.User, p.cfg.Password)
-		resp, err := p.client.Do(req)
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				cancel()
-				return nil
-			}
-			err = fmt.Errorf("clickhouse status=%d", resp.StatusCode)
-		}
-		lastErr = err
-		cancel()
-		if attempt < 2 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Second):
-			}
-		}
-	}
-	return lastErr
 }
 
 func (p *ClickHouseRawPublisher) exec(ctx context.Context, sql string) error {
@@ -474,14 +605,24 @@ func (p *ClickHouseRawPublisher) exec(ctx context.Context, sql string) error {
 		return err
 	}
 	req.SetBasicAuth(p.cfg.User, p.cfg.Password)
-	resp, err := p.client.Do(req)
+	requestClient := *p.client
+	requestClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxClickHouseErrorBytes+1))
+	if readErr != nil {
+		return readErr
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("clickhouse status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return &clickHouseHTTPStatusError{status: resp.StatusCode, code: rawClickHouseErrorCode(string(respBody))}
+	}
+	if len(respBody) > maxClickHouseErrorBytes {
+		return fmt.Errorf("clickhouse response exceeds bounded limit")
 	}
 	return nil
 }
