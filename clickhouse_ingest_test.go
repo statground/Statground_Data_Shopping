@@ -379,6 +379,20 @@ func TestShoppingWorkflowPinsBoundedPreflightRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := string(source)
+	dispatchParts := strings.SplitN(workflow, "  workflow_dispatch:\n    inputs:\n", 2)
+	if len(dispatchParts) != 2 {
+		t.Fatal("workflow_dispatch inputs section is missing")
+	}
+	dispatchInputs := strings.SplitN(dispatchParts[1], "  schedule:\n", 2)[0]
+	inputCount := 0
+	for _, line := range strings.Split(dispatchInputs, "\n") {
+		if strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "        ") && strings.HasSuffix(line, ":") {
+			inputCount++
+		}
+	}
+	if inputCount != 17 || inputCount > 25 {
+		t.Fatalf("workflow_dispatch input count=%d, want 17 within GitHub.com limit 25", inputCount)
+	}
 	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"`); got != 3 {
 		t.Fatalf("preflight retry budget count=%d, want crawl, detail, and manual replay jobs", got)
 	}
@@ -399,5 +413,25 @@ func TestShoppingWorkflowPinsBoundedPreflightRetry(t *testing.T) {
 	}
 	if got := strings.Count(workflow, `[[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]]`); got != 3 {
 		t.Fatalf("direct endpoint gateway rejection count=%d, want raw writer/replayer jobs", got)
+	}
+}
+
+func TestShoppingWorkflowExposesSecretFreeContractPath(t *testing.T) {
+	source, err := os.ReadFile(".github/workflows/shopping_contract_tests.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(source)
+
+	if !strings.Contains(workflow, "push:\n    branches: [main]") ||
+		!strings.Contains(workflow, "workflow_dispatch:") ||
+		!strings.Contains(workflow, "python3 -m unittest scripts/test_clickhouse_pressure_gate.py") ||
+		!strings.Contains(workflow, "github.com/rhysd/actionlint/cmd/actionlint@v1.7.11") {
+		t.Fatal("workflow must expose a secret-free contract_test path")
+	}
+	for _, forbidden := range []string{"secrets.", "CH_HOST:", "go run .", "Gate ClickHouse writes", "Run crawler"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("contract_test job contains external or write-capable operation %q", forbidden)
+		}
 	}
 }

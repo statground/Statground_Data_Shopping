@@ -42,6 +42,14 @@ class ClickHousePressureGateTest(unittest.TestCase):
     def test_healthy_snapshot_passes(self):
         self.assertEqual(gate.evaluate(self.healthy, self.thresholds), [])
 
+    def test_distributed_threshold_is_configurable_and_validated(self):
+        self.assertEqual(self.thresholds["max_distributed_files"], 10_000)
+        custom = gate.load_thresholds({"CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES": "123"})
+        self.assertEqual(custom["max_distributed_files"], 123)
+        for raw in ("-1", "not-a-number"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                gate.load_thresholds({"CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES": raw})
+
     def test_expected_endpoint_contract_is_strict_and_fail_closed(self):
         self.assertEqual(
             gate.load_expected_endpoint_hostname({gate.ENDPOINT_ENV: "Clickhouse_S1_R1"}),
@@ -57,6 +65,8 @@ class ClickHousePressureGateTest(unittest.TestCase):
 
     def test_each_pressure_dimension_blocks(self):
         cases = {
+            "distributed_files": 10_001,
+            "broken_distributed_files": 1,
             "unhealthy_replicas": 1,
             "available_bytes": 10,
             "iowait_normalized": 0.75,
@@ -69,9 +79,13 @@ class ClickHousePressureGateTest(unittest.TestCase):
                 snapshot = dict(self.healthy, **{key: value})
                 self.assertTrue(gate.evaluate(snapshot, self.thresholds))
 
-    def test_unrelated_global_distributed_backlog_is_observability_only(self):
-        snapshot = dict(self.healthy, distributed_files=606_448, broken_distributed_files=7)
-        self.assertEqual(gate.evaluate(snapshot, self.thresholds), [])
+    def test_distributed_backlog_and_broken_files_fail_closed(self):
+        at_limit = dict(self.healthy, distributed_files=10_000)
+        self.assertEqual(gate.evaluate(at_limit, self.thresholds), [])
+        over_limit = dict(self.healthy, distributed_files=606_448)
+        self.assertIn("distributed_files=606448", gate.evaluate(over_limit, self.thresholds))
+        broken = dict(self.healthy, broken_distributed_files=7)
+        self.assertIn("broken_distributed_files=7", gate.evaluate(broken, self.thresholds))
 
     def test_missing_filesystem_metrics_fails_closed(self):
         snapshot = dict(self.healthy, available_samples=0)
@@ -181,6 +195,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertNotIn("secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn('CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"', workflow)
+        self.assertIn('CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"', workflow)
         self.assertEqual(workflow.count("CLICKHOUSE_PRESSURE_GATE_TARGETS: >-"), 5)
         self.assertIn("local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history", workflow)
         self.assertIn("local:Data_Shopping_Raw.kurly_product_raw_endpoint_history", workflow)
