@@ -174,10 +174,12 @@ class ClickHousePressureGateTest(unittest.TestCase):
             self.assertLess(gate_offset, writer_offset)
         self.assertEqual(
             workflow.count(
-                "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}"
+                "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1"
             ),
             1,
         )
+        self.assertNotIn("secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
+        self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn('CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"', workflow)
         self.assertEqual(workflow.count("CLICKHOUSE_PRESSURE_GATE_TARGETS: >-"), 5)
         self.assertIn("local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history", workflow)

@@ -385,8 +385,11 @@ func TestShoppingWorkflowPinsBoundedPreflightRetry(t *testing.T) {
 	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"`); got != 3 {
 		t.Fatalf("preflight retry backoff count=%d, want crawl, detail, and manual replay jobs", got)
 	}
-	if got := strings.Count(workflow, `CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}`); got != 1 {
+	if got := strings.Count(workflow, `CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1`); got != 1 {
 		t.Fatalf("workflow-level direct endpoint hostname binding count=%d, want 1", got)
+	}
+	if strings.Contains(workflow, `secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME`) || strings.Contains(workflow, `vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME`) {
+		t.Fatal("workflow direct endpoint identity still depends on manual repository configuration")
 	}
 	if got := strings.Count(workflow, `test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME"`); got != 3 {
 		t.Fatalf("direct endpoint hostname required check count=%d, want raw writer/replayer jobs", got)
