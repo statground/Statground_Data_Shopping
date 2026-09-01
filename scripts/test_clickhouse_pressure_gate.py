@@ -14,6 +14,8 @@ class ClickHousePressureGateTest(unittest.TestCase):
     def setUp(self):
         self.thresholds = gate.load_thresholds({})
         self.healthy = {
+            "endpoint_hostname": "Clickhouse_S1_R1",
+            "expected_endpoint_hostname": "Clickhouse_S1_R1",
             "distributed_files": 20,
             "broken_distributed_files": 0,
             "available_samples": 1,
@@ -39,6 +41,19 @@ class ClickHousePressureGateTest(unittest.TestCase):
 
     def test_healthy_snapshot_passes(self):
         self.assertEqual(gate.evaluate(self.healthy, self.thresholds), [])
+
+    def test_expected_endpoint_contract_is_strict_and_fail_closed(self):
+        self.assertEqual(
+            gate.load_expected_endpoint_hostname({gate.ENDPOINT_ENV: "Clickhouse_S1_R1"}),
+            "Clickhouse_S1_R1",
+        )
+        for raw in ("", " Clickhouse_S1_R1", "clickhouse-gateway", "bad/host"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                gate.load_expected_endpoint_hostname({gate.ENDPOINT_ENV: raw})
+        mismatch = dict(self.healthy, endpoint_hostname="Clickhouse_S1_R2")
+        self.assertIn("endpoint_hostname_mismatch", gate.evaluate(mismatch, self.thresholds))
+        missing = dict(self.healthy, endpoint_hostname="")
+        self.assertIn("endpoint_hostname_mismatch", gate.evaluate(missing, self.thresholds))
 
     def test_each_pressure_dimension_blocks(self):
         cases = {
@@ -112,6 +127,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
             }
         )
         query = gate.build_pressure_query(targets)
+        self.assertIn("hostName() AS endpoint_hostname", query)
         self.assertIn("system.metrics", query)
         self.assertIn("system.asynchronous_metrics", query)
         self.assertIn("system.disks", query)
@@ -156,6 +172,12 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertEqual(len(writer_offsets), 5)
         for gate_offset, writer_offset in zip(gate_offsets, writer_offsets):
             self.assertLess(gate_offset, writer_offset)
+        self.assertEqual(
+            workflow.count(
+                "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}"
+            ),
+            1,
+        )
         self.assertIn('CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"', workflow)
         self.assertEqual(workflow.count("CLICKHOUSE_PRESSURE_GATE_TARGETS: >-"), 5)
         self.assertIn("local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history", workflow)
