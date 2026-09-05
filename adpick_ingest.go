@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -84,7 +86,9 @@ func (p *ClickHouseRawPublisher) adpickGuardedRead(query string) (string, error)
 	return "SELECT * FROM (" + query + ") WHERE " + guard + format, nil
 }
 
-func RunAdpickCatalogFromEnv(ctx context.Context) error {
+func RunAdpickCatalogFromEnv(ctx context.Context) (resultErr error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
 	if !ShouldWriteClickHouse() {
 		return fmt.Errorf("Adpick collection requires INGEST_MODE=clickhouse")
 	}
@@ -96,6 +100,17 @@ func RunAdpickCatalogFromEnv(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	report := newAdpickCoverage(len(queries))
+	client.coverage = report
+	client.progress = func() error { return writeAdpickCoverage(report, client) }
+	defer func() {
+		if resultErr != nil {
+			report.Failure = "collection_or_publication_failed"
+		}
+		if err := writeAdpickCoverage(report, client); err != nil && resultErr == nil {
+			resultErr = err
+		}
+	}()
 	limit := boundedRawInt(envString("ADPICK_SEARCH_LIMIT", "20"), 0, 1, 20)
 	if limit == 0 {
 		return fmt.Errorf("ADPICK_SEARCH_LIMIT must be between 1 and 20")
@@ -108,6 +123,7 @@ func RunAdpickCatalogFromEnv(ctx context.Context) error {
 		return err
 	}
 	runUUID := envString("ADPICK_RUN_UUID", NewUUIDv7())
+	report.RunUUID = runUUID
 	// A complete upstream batch is validated before any public or raw write.
 	records, err := collectAdpickCatalog(ctx, client, queries, limit, runUUID, NowKST())
 	if err != nil {
@@ -116,7 +132,54 @@ func RunAdpickCatalogFromEnv(ctx context.Context) error {
 	if len(records) == 0 {
 		return fmt.Errorf("Adpick returned no eligible merchants; existing catalogs retained")
 	}
-	return publishAdpickCatalog(ctx, pub, records)
+	// The API phase can last 25 minutes. Recheck the actual write boundary,
+	// rather than relying on the workflow's now-stale startup pressure check.
+	if err := runAdpickPublicationGate(ctx, pub); err != nil {
+		return err
+	}
+	if err := preflightAdpickCatalog(ctx, pub); err != nil {
+		return err
+	}
+	if err := publishAdpickCatalog(ctx, pub, records); err != nil {
+		return err
+	}
+	report.PublicationComplete = true
+	return nil
+}
+
+func adpickPublicationGateEnv(pub *ClickHouseRawPublisher) []string {
+	overrides := map[string]string{
+		"CLICKHOUSE_HOST": pub.cfg.URL, "CLICKHOUSE_PORT": "", "CLICKHOUSE_PROTOCOL": "", "CLICKHOUSE_HTTP_URL_PATH": "",
+		"CLICKHOUSE_USER": pub.cfg.User, "CLICKHOUSE_PASSWORD": pub.cfg.Password,
+		"CH_HOST": pub.cfg.URL, "CH_PORT": "", "CH_PROTOCOL": "", "CH_HTTP_URL_PATH": "",
+		"CH_USER": pub.cfg.User, "CH_PASSWORD": pub.cfg.Password,
+		"CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME": pub.cfg.DirectEndpointHostname,
+		"CLICKHOUSE_PRESSURE_GATE_TARGETS":    "local:" + adpickRawTable + ",local:" + adpickSnapshotTable + ",local:" + adpickPublishedTable + ",local:" + pub.cfg.OutboxTable,
+	}
+	env := []string{}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, override := overrides[key]; !override && key != "ADPICK_BIZ_API_KEY" {
+			env = append(env, entry)
+		}
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
+}
+
+func runAdpickPublicationGate(ctx context.Context, pub *ClickHouseRawPublisher) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "python3", "scripts/clickhouse_pressure_gate.py")
+	command.Env = adpickPublicationGateEnv(pub)
+	// Gate output is diagnostic-only; do not pass connection errors or secrets
+	// through subprocess stderr. A nonzero exit always blocks all catalog writes.
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("Adpick publication storage pressure gate rejected")
+	}
+	return nil
 }
 
 func preflightAdpickCatalog(ctx context.Context, pub *ClickHouseRawPublisher) error {
@@ -221,7 +284,7 @@ func verifyAdpickRecords(ctx context.Context, pub *ClickHouseRawPublisher, table
 	if err != nil {
 		return err
 	}
-	body, err := pub.queryBody(ctx, query, adpickResponseLimit)
+	body, err := pub.queryBody(ctx, query, adpickCatalogLimit)
 	if err != nil {
 		return fmt.Errorf("Adpick readback failed for %s: %w", table, err)
 	}
@@ -281,7 +344,7 @@ func adpickPublicationBody(pub *ClickHouseRawPublisher, records []adpickCatalogR
 			return nil, err
 		}
 	}
-	if payload.Len() > adpickResponseLimit {
+	if payload.Len() > adpickCatalogLimit {
 		return nil, fmt.Errorf("Adpick publication payload exceeds bounded limit")
 	}
 	// The expected rows remain typed JSONEachRow input, so neither titles nor

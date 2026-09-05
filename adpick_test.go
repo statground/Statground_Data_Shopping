@@ -219,7 +219,7 @@ func TestAdpickPublicationRequiresReadbackBeforeMarker(t *testing.T) {
 }
 
 func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
-	body, err := os.ReadFile(".github/workflows/gmarket-crawl.yml")
+	body, err := os.ReadFile(".github/workflows/adpick-catalog.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
 		t.Fatal("missing Adpick job")
 	}
 	job := text[start:]
-	for _, required := range []string{"needs: crawl", "vars.ADPICK_CATALOG_ENABLED == 'true'", "secrets.ADPICK_BIZ_API_KEY", `ADPICK_COLLECT_ONLY: "true"`, "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
+	for _, required := range []string{"vars.ADPICK_CATALOG_ENABLED != 'false'", "secrets.ADPICK_API", `ADPICK_COLLECT_ONLY: 'true'`, "ADPICK_QUERY_PROFILE: expanded", "adpick_coverage_summary.py", "actions/upload-artifact@v4", "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
 		if !strings.Contains(job, required) {
 			t.Errorf("missing workflow contract %s", required)
 		}

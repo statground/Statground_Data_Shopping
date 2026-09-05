@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "crawl, detail_enrich, adpick_catalog, or manual bounded raw_outbox_replay"
+        description: "crawl, detail_enrich, or manual bounded raw_outbox_replay"
         required: false
         default: "crawl"
         type: choice
@@ -12,7 +12,6 @@ on:
           - crawl
           - detail_enrich
           - raw_outbox_replay
-          - adpick_catalog
       raw_outbox_replay_limit:
         description: "Pending raw batches to replay once; default 25, hard cap 100"
         required: false
@@ -651,71 +650,4 @@ jobs:
           CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
-        run: go run .
-
-  adpick_catalog:
-    # Keep the existing Shopping collector as the sole scheduling and data owner.
-    # Enabling scheduled collection requires the SQL contract and dedicated API key.
-    needs: crawl
-    if: ${{ always() && ((github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *' && needs.crawl.result == 'success' && vars.ADPICK_CATALOG_ENABLED == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'adpick_catalog')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      INGEST_MODE: clickhouse
-      ADPICK_COLLECT_ONLY: "true"
-      ADPICK_SEARCH_LIMIT: "20"
-      ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
-      CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
-      CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: "30"
-      CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
-      CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
-      CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
-      CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
-      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Validate catalog configuration
-        env:
-          ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_BIZ_API_KEY }}
-        run: |
-          test -n "$ADPICK_BIZ_API_KEY" || { echo "ADPICK_BIZ_API_KEY secret is required; use a dedicated collection key"; exit 1; }
-          test -n "$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_HOST secret is required"; exit 1; }
-          test -n "$CLICKHOUSE_PORT" || { echo "CLICKHOUSE_PORT secret is required"; exit 1; }
-          test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER secret is required"; exit 1; }
-          test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD secret is required"; exit 1; }
-          test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME is required"; exit 1; }
-          [[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME is unsafe"; exit 1; }
-          [[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]] || { echo "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME must identify one server"; exit 1; }
-
-      - name: Resolve Go modules and checksums
-        run: |
-          go mod download all
-          go mod verify
-
-      - name: Run tests
-        run: go test ./...
-
-      - name: Gate ClickHouse catalog writes on storage pressure
-        env:
-          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
-            local:Data_Shopping_Raw.adpick_vertical_catalog_raw_endpoint_history,
-            local:Data_Shopping_Service.adpick_vertical_catalog_snapshot,
-            local:Data_Shopping_Service.adpick_vertical_catalog_published_batch,
-            local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
-        run: python3 scripts/clickhouse_pressure_gate.py
-
-      - name: Collect verify and publish travel and services catalogs
-        env:
-          ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_BIZ_API_KEY }}
         run: go run .

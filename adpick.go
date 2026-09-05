@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -22,7 +20,8 @@ const (
 	adpickAPIBase        = "https://biz.adpick.co.kr/api/"
 	adpickResponseLimit  = 4 << 20
 	adpickSearchInterval = 6100 * time.Millisecond
-	adpickMaximumQueries = 32
+	adpickMaximumQueries = 240
+	adpickCatalogLimit   = 32 << 20
 )
 
 type adpickQuery struct {
@@ -90,83 +89,17 @@ type adpickCatalogRecord struct {
 	Version        uint64  `json:"version"`
 }
 
-type adpickClient struct {
-	key        string
-	baseURL    string
-	client     *http.Client
-	interval   time.Duration
-	lastSearch time.Time
-}
-
-func newAdpickClient(key string) (*adpickClient, error) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return nil, fmt.Errorf("ADPICK_BIZ_API_KEY is required")
-	}
-	if len(key) > 512 || strings.ContainsAny(key, "/?#\\\r\n\t ") {
-		return nil, fmt.Errorf("invalid ADPICK_BIZ_API_KEY")
-	}
-	return &adpickClient{key: key, baseURL: adpickAPIBase, interval: adpickSearchInterval,
-		client: &http.Client{Timeout: 25 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
-}
-
-func (c *adpickClient) request(ctx context.Context, endpoint string, params url.Values, target any) error {
-	if endpoint != "malls" && endpoint != "search" {
-		return fmt.Errorf("unsupported Adpick read endpoint")
-	}
-	if endpoint == "search" && !c.lastSearch.IsZero() {
-		delay := time.Until(c.lastSearch.Add(c.interval))
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-	requestURL := c.baseURL + url.PathEscape(c.key) + "/" + endpoint + "?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return fmt.Errorf("Adpick request configuration rejected")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Statground-Data-Shopping/1.0")
-	if endpoint == "search" {
-		c.lastSearch = time.Now()
-	}
-	resp, err := c.client.Do(req)
-	// The API credential is in the URL: never propagate transport errors or response bodies.
-	if err != nil {
-		return fmt.Errorf("Adpick %s transport failure", endpoint)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Adpick %s HTTP status %d", endpoint, resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, adpickResponseLimit+1))
-	if err != nil || len(body) > adpickResponseLimit {
-		return fmt.Errorf("Adpick %s response unavailable or oversized", endpoint)
-	}
-	var envelope struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil || !envelope.Success || len(envelope.Data) == 0 || envelope.Data[0] != '[' {
-		return fmt.Errorf("Adpick %s unsuccessful response", endpoint)
-	}
-	if err := json.Unmarshal(envelope.Data, target); err != nil {
-		return fmt.Errorf("Adpick %s invalid data", endpoint)
-	}
-	return nil
-}
-
 func adpickQueriesFromEnv() ([]adpickQuery, error) {
 	raw := envString("ADPICK_SEARCH_QUERIES_JSON", "")
 	queries := append([]adpickQuery(nil), defaultAdpickQueries...)
+	profile := envString("ADPICK_QUERY_PROFILE", "standard")
+	if profile == "expanded" {
+		queries = expandedAdpickQueries()
+	} else if profile != "standard" {
+		return nil, fmt.Errorf("ADPICK_QUERY_PROFILE must be standard or expanded")
+	}
 	if raw != "" {
-		if len(raw) > 16*1024 || json.Unmarshal([]byte(raw), &queries) != nil {
+		if len(raw) > 64*1024 || json.Unmarshal([]byte(raw), &queries) != nil {
 			return nil, fmt.Errorf("invalid ADPICK_SEARCH_QUERIES_JSON")
 		}
 	}
@@ -256,7 +189,7 @@ func safeAdpickURL(raw string, affiliate bool) string {
 		}
 	}
 	if affiliate {
-		if host != "bitl.bz" && host != "deg.kr" && host != "adpick.co.kr" && host != "www.adpick.co.kr" {
+		if host != "bitl.bz" && host != "deg.kr" && host != "adpick.co.kr" && host != "www.adpick.co.kr" && host != "link.adpick.co.kr" {
 			return ""
 		}
 	}
@@ -285,6 +218,10 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 		requested[q.Vertical] = true
 	}
 	records := []adpickCatalogRecord{}
+	report := client.coverage
+	if report != nil {
+		report.QueriesPlanned = len(queries)
+	}
 	byCode := map[string]adpickCatalogRecord{}
 	seenMerchant := map[string]bool{}
 	for _, mall := range malls {
@@ -308,9 +245,13 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 		}
 		byCode[mall.Code] = record
 		records = append(records, record)
+		if report != nil {
+			report.Merchants[identity.Key] = adpickMerchantCoverage{Code: mall.Code, Vertical: identity.Vertical}
+		}
 	}
 	seenOffers := map[string]bool{}
 	for _, q := range queries {
+		stats := adpickQueryCoverage{Vertical: q.Vertical, Category: q.Category, Keyword: q.Keyword}
 		var offers []adpickOffer
 		if err := client.request(ctx, "search", url.Values{"q": {q.Keyword}, "limit": {strconv.Itoa(limit)}}, &offers); err != nil {
 			return nil, err
@@ -318,9 +259,11 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 		if len(offers) > limit {
 			return nil, fmt.Errorf("Adpick search exceeds requested limit")
 		}
+		stats.Returned = len(offers)
 		for _, offer := range offers {
 			merchant, eligible := byCode[offer.Code]
 			if !eligible || merchant.Vertical != q.Vertical {
+				stats.Excluded++
 				continue
 			}
 			if offer.Name != "" {
@@ -331,11 +274,13 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			}
 			title, link := adpickText(offer.Title, 300), safeAdpickURL(offer.Link, true)
 			if title == "" || link == "" {
+				stats.Invalid++
 				continue
 			}
 			// This is an affiliate-link identity, not an original product ID or comparable booking quote.
 			key := fmt.Sprintf("%x", sha256.Sum256([]byte(offer.Code+"\x1f"+link)))
 			if seenOffers[key] {
+				stats.Duplicates++
 				continue
 			}
 			seenOffers[key] = true
@@ -344,7 +289,28 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			record.Title, record.Description, record.ImageURL, record.AffiliateURL = title, "", safeAdpickURL(offer.Photo, false), link
 			record.PriceText, record.PriceKRW, record.SearchKeyword = adpickText(offer.Price, 100), adpickPrice(offer.Price), q.Keyword
 			records = append(records, record)
+			stats.NewOffers++
+			if report != nil {
+				report.OffersByVertical[q.Vertical]++
+				report.OffersByCategory[q.Vertical+"/"+q.Category]++
+				m := report.Merchants[merchant.MerchantKey]
+				m.Offers++
+				report.Merchants[merchant.MerchantKey] = m
+			}
 		}
+		if report != nil {
+			report.Queries = append(report.Queries, stats)
+			report.QueriesCompleted++
+			fmt.Printf("[adpick] query=%d/%d vertical=%s category=%s returned=%d new=%d duplicates=%d excluded=%d invalid=%d\n", report.QueriesCompleted, len(queries), q.Vertical, q.Category, stats.Returned, stats.NewOffers, stats.Duplicates, stats.Excluded, stats.Invalid)
+			if client.progress != nil {
+				if err := client.progress(); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if report != nil {
+		report.CollectionComplete = true
 	}
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].Vertical+records[i].ItemKey < records[j].Vertical+records[j].ItemKey

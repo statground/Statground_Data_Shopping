@@ -393,11 +393,11 @@ func TestShoppingWorkflowPinsBoundedPreflightRetry(t *testing.T) {
 	if inputCount != 17 || inputCount > 25 {
 		t.Fatalf("workflow_dispatch input count=%d, want 17 within GitHub.com limit 25", inputCount)
 	}
-	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"`); got != 4 {
-		t.Fatalf("preflight retry budget count=%d, want crawl, detail, Adpick, and manual replay jobs", got)
+	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"`); got != 3 {
+		t.Fatalf("preflight retry budget count=%d, want crawl, detail, and manual replay jobs", got)
 	}
-	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"`); got != 4 {
-		t.Fatalf("preflight retry backoff count=%d, want crawl, detail, Adpick, and manual replay jobs", got)
+	if got := strings.Count(workflow, `CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: "5"`); got != 3 {
+		t.Fatalf("preflight retry backoff count=%d, want crawl, detail, and manual replay jobs", got)
 	}
 	if got := strings.Count(workflow, `CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1`); got != 1 {
 		t.Fatalf("workflow-level direct endpoint hostname binding count=%d, want 1", got)
@@ -405,13 +405,13 @@ func TestShoppingWorkflowPinsBoundedPreflightRetry(t *testing.T) {
 	if strings.Contains(workflow, `secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME`) || strings.Contains(workflow, `vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME`) {
 		t.Fatal("workflow direct endpoint identity still depends on manual repository configuration")
 	}
-	if got := strings.Count(workflow, `test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME"`); got != 4 {
+	if got := strings.Count(workflow, `test -n "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME"`); got != 3 {
 		t.Fatalf("direct endpoint hostname required check count=%d, want raw writer/replayer jobs", got)
 	}
-	if got := strings.Count(workflow, `[[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]]`); got != 4 {
+	if got := strings.Count(workflow, `[[ "$CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$ ]]`); got != 3 {
 		t.Fatalf("direct endpoint hostname safety check count=%d, want raw writer/replayer jobs", got)
 	}
-	if got := strings.Count(workflow, `[[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]]`); got != 4 {
+	if got := strings.Count(workflow, `[[ "${CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME,,}" != *gateway* ]]`); got != 3 {
 		t.Fatalf("direct endpoint gateway rejection count=%d, want raw writer/replayer jobs", got)
 	}
 }

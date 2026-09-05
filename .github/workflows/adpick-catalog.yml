@@ -1,0 +1,106 @@
+name: Adpick Travel and Services
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/adpick-catalog.yml'
+      - 'adpick*.go'
+  schedule:
+    - cron: '25 2 * * *'
+
+permissions:
+  contents: read
+
+# The other Shopping workflow uses this same group: a single API collector and
+# a single writer/replayer own the shared endpoint-local outbox at a time.
+concurrency:
+  group: statground-shopping-clickhouse-writer-replayer
+  cancel-in-progress: false
+
+jobs:
+  adpick_catalog:
+    if: ${{ github.event_name != 'schedule' || vars.ADPICK_CATALOG_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      INGEST_MODE: clickhouse
+      ADPICK_COLLECT_ONLY: 'true'
+      ADPICK_QUERY_PROFILE: expanded
+      ADPICK_SEARCH_LIMIT: '20'
+      ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
+      ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
+      CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
+      CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: '120'
+      CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: '30'
+      CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: '90'
+      CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS: '5'
+      CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: '107374182400'
+      CLICKHOUSE_PRESSURE_GATE_MAX_USED_RATIO: '0.90'
+      CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_INODES: '1000000'
+      CLICKHOUSE_PRESSURE_GATE_MAX_USED_INODE_RATIO: '0.95'
+      CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_QUEUE: '2000'
+      CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_DELAY_SECONDS: '900'
+      CLICKHOUSE_PRESSURE_GATE_MAX_IOWAIT_NORMALIZED: '0.50'
+      CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: '15'
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+      CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+      CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate catalog configuration
+        env:
+          ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
+        run: |
+          test -n "$ADPICK_BIZ_API_KEY" || { echo 'ADPICK_API secret is required'; exit 1; }
+          test -n "$CLICKHOUSE_HOST" || { echo 'CLICKHOUSE_HOST secret is required'; exit 1; }
+          test -n "$CLICKHOUSE_PORT" || { echo 'CLICKHOUSE_PORT secret is required'; exit 1; }
+          test -n "$CLICKHOUSE_USER" || { echo 'CLICKHOUSE_USER secret is required'; exit 1; }
+          test -n "$CLICKHOUSE_PASSWORD" || { echo 'CLICKHOUSE_PASSWORD secret is required'; exit 1; }
+
+      - name: Resolve Go modules and checksums
+        run: |
+          go mod download all
+          go mod verify
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Gate ClickHouse catalog writes on storage pressure
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:Data_Shopping_Raw.adpick_vertical_catalog_raw_endpoint_history,
+            local:Data_Shopping_Service.adpick_vertical_catalog_snapshot,
+            local:Data_Shopping_Service.adpick_vertical_catalog_published_batch,
+            local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
+        run: python3 scripts/clickhouse_pressure_gate.py
+
+      - name: Collect verify and publish travel and services catalogs
+        env:
+          ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
+        run: go run .
+
+      - name: Summarize actual search coverage
+        if: ${{ always() }}
+        run: python3 scripts/adpick_coverage_summary.py
+
+      - name: Retain collection coverage
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: adpick-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ADPICK_COVERAGE_REPORT }}
+          if-no-files-found: warn
+          retention-days: 30
