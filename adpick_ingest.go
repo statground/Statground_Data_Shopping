@@ -127,7 +127,7 @@ func preflightAdpickCatalog(ctx context.Context, pub *ClickHouseRawPublisher) er
 	}
 	for _, table := range []string{adpickRawTable, adpickSnapshotTable, adpickPublishedTable} {
 		for _, privilege := range []string{"INSERT", "SELECT"} {
-			if _, err := pub.retryPreflightSQL(ctx, "CHECK GRANT "+privilege+" ON "+table); err != nil {
+			if err := pub.checkAdpickGrant(ctx, privilege, table); err != nil {
 				return fmt.Errorf("Adpick catalog %s preflight failed for %s: %w", privilege, table, err)
 			}
 		}
@@ -136,11 +136,30 @@ func preflightAdpickCatalog(ctx context.Context, pub *ClickHouseRawPublisher) er
 		}
 	}
 	for _, privilege := range []string{"INSERT", "SELECT", "ALTER UPDATE"} {
-		if _, err := pub.retryPreflightSQL(ctx, "CHECK GRANT "+privilege+" ON "+pub.cfg.OutboxTable); err != nil {
+		if err := pub.checkAdpickGrant(ctx, privilege, pub.cfg.OutboxTable); err != nil {
 			return fmt.Errorf("Adpick catalog outbox preflight failed: %w", err)
 		}
 	}
 	return nil
+}
+
+func (pub *ClickHouseRawPublisher) checkAdpickGrant(ctx context.Context, privilege, table string) error {
+	if !validRawTableIdentifier(table) || (privilege != "INSERT" && privilege != "SELECT" && privilege != "ALTER UPDATE") {
+		return fmt.Errorf("invalid Adpick grant check")
+	}
+	_, err := retryClickHousePreflight(ctx, pub.cfg.PreflightRetryBackoff, func(attemptCtx context.Context) error {
+		// CHECK GRANT is not a SELECT: FORMAT is invalid and denied rights return
+		// HTTP 200 with a zero. Only one affirmative scalar authorizes the write.
+		body, err := pub.queryBody(attemptCtx, "CHECK GRANT "+privilege+" ON "+table, 16)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(body)) != "1" {
+			return fmt.Errorf("Adpick required grant denied or response invalid")
+		}
+		return nil
+	})
+	return err
 }
 
 func adpickRecordMap(record adpickCatalogRecord) (clickHouseRawRow, error) {

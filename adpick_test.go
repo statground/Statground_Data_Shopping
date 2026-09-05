@@ -243,6 +243,45 @@ func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
 	}
 }
 
+func TestAdpickGrantRequiresAffirmativeScalar(t *testing.T) {
+	for _, response := range []string{"1\n", "0\n", "", "1\n0\n", `{"result":1}`, "true\n", strings.Repeat("1", 20)} {
+		t.Run("response="+strings.TrimSpace(response), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				query := requestBody(t, r)
+				if query != "CHECK GRANT INSERT ON "+adpickRawTable {
+					t.Errorf("grant query must not append FORMAT or ignore the required target: %s", query)
+				}
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+			pub := rawPublisherForTest(server)
+			err := pub.checkAdpickGrant(context.Background(), "INSERT", adpickRawTable)
+			if (err == nil) != (response == "1\n") || calls != 1 {
+				t.Fatalf("grant accepted=%t calls=%d response=%q", err == nil, calls, response)
+			}
+		})
+	}
+}
+
+func TestAdpickDeniedGrantStopsBeforeAnyWrite(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := requestBody(t, r)
+		requests = append(requests, query)
+		if query != "CHECK GRANT INSERT ON "+adpickRawTable {
+			t.Errorf("denied grant allowed later preflight or write: %s", query)
+		}
+		_, _ = io.WriteString(w, "0\n")
+	}))
+	defer server.Close()
+	pub := rawPublisherForTest(server)
+	if err := preflightAdpickCatalog(context.Background(), pub); err == nil || len(requests) != 1 {
+		t.Fatalf("denied preflight did not stop: requests=%d err=%v", len(requests), err)
+	}
+}
+
 func TestAdpickReplayAndOutboxKeepExecutingNodeGuard(t *testing.T) {
 	records := []adpickCatalogRecord{{Source: "adpick_biz", Vertical: "travel", RecordType: "merchant", MerchantCode: "TRIP", MerchantKey: "trip_com", MerchantName: "트립닷컴", ItemKey: strings.Repeat("a", 64), Title: "트립닷컴", CollectedAt: "2026-09-06 01:02:03.004", CollectRunUUID: adpickTestRun, Version: 123}}
 	rows, err := adpickCatalogRows(records, "github_actions", records[0].CollectedAt, true)
