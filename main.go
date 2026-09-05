@@ -3406,6 +3406,13 @@ func RunGmarketCollection(rootCtx context.Context) {
 func main() {
 	ApplyEnvConfig()
 	ApplyKurlyEnvConfig()
+	if envBool("ADPICK_COLLECT_ONLY", false) {
+		if err := RunAdpickCatalogFromEnv(context.Background()); err != nil {
+			fmt.Println("Adpick travel and services catalog collection failed:", shortIngestError(err))
+			os.Exit(1)
+		}
+		return
+	}
 	if envBool("SHOPPING_RAW_OUTBOX_REPLAY_ONLY", false) {
 		if !ShouldWriteClickHouse() {
 			fmt.Println("Shopping raw outbox replay requires INGEST_MODE=clickhouse")

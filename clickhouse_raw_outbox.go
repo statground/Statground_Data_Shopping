@@ -249,7 +249,7 @@ func (p *ClickHouseRawPublisher) insertRawBatchWithOutbox(ctx context.Context, t
 		return fmt.Errorf("raw batch identity rejected: %w", err)
 	}
 	batch.eventUUIDs = eventUUIDs
-	body, err := rawInsertBody(table, batch, true)
+	body, err := p.catalogRawInsertBody(table, batch)
 	if err != nil {
 		return err
 	}
@@ -287,6 +287,12 @@ func (p *ClickHouseRawPublisher) enqueueRawOutbox(ctx context.Context, table str
 		return err
 	}
 	body, err := rawInsertBodyWithLimit(p.cfg.OutboxTable, batches[0], false, maxRawOutboxResponseBytes)
+	if err == nil && adpickWriteTarget(table) {
+		body, err = p.adpickInputInsertBody(p.cfg.OutboxTable,
+			"outbox_uuid, created_at, target_table, rows_json, row_count, deduplication_token, source_error",
+			"outbox_uuid UUID, created_at DateTime64(3, 'Asia/Seoul'), target_table String, rows_json String, row_count UInt32, deduplication_token String, source_error String",
+			batches[0], maxRawOutboxResponseBytes)
+	}
 	if err != nil {
 		return err
 	}
@@ -357,9 +363,10 @@ func (p *ClickHouseRawPublisher) replayRawOutbox(ctx context.Context) error {
 	}
 	health := make(map[string]bool)
 	replayed := make([]string, 0, len(headers))
+	guardAcknowledgement := false
 	markThenReturn := func(replayErr error) error {
 		if len(replayed) > 0 {
-			if markErr := p.markRawOutboxReplayed(replayed); markErr != nil {
+			if markErr := p.markRawOutboxReplayedWithGuard(replayed, guardAcknowledgement); markErr != nil {
 				return fmt.Errorf("shopping raw outbox acknowledgement failed: %w", markErr)
 			}
 		}
@@ -391,7 +398,7 @@ func (p *ClickHouseRawPublisher) replayRawOutbox(ctx context.Context) error {
 			return markThenReturn(fmt.Errorf("shopping raw outbox target reconciliation failed: %w", err))
 		}
 		if !alreadyAccepted {
-			body, err := rawInsertBody(target, batch, true)
+			body, err := p.catalogRawInsertBody(target, batch)
 			if err != nil {
 				return markThenReturn(err)
 			}
@@ -400,6 +407,7 @@ func (p *ClickHouseRawPublisher) replayRawOutbox(ctx context.Context) error {
 			}
 		}
 		replayed = append(replayed, outboxUUID)
+		guardAcknowledgement = guardAcknowledgement || adpickWriteTarget(target)
 	}
 	if err := markThenReturn(nil); err != nil {
 		return err
@@ -554,6 +562,13 @@ FROM %s
 WHERE event_uuid IN (%s)
 SETTINGS max_threads = 1, max_execution_time = 10
 FORMAT JSONEachRow`, target, strings.Join(values, ", "))
+	if adpickWriteTarget(target) {
+		var err error
+		sql, err = p.adpickGuardedRead(sql)
+		if err != nil {
+			return false, err
+		}
+	}
 	body, err := p.queryBody(ctx, sql, maxRawOutboxHeaderBytes)
 	if err != nil {
 		return false, err
@@ -577,10 +592,14 @@ FORMAT JSONEachRow`, target, strings.Join(values, ", "))
 }
 
 func (p *ClickHouseRawPublisher) allowedRawReplayTarget(target string) bool {
-	return target == p.cfg.GmarketTable || target == p.cfg.KurlyTable
+	return target == p.cfg.GmarketTable || target == p.cfg.KurlyTable || target == adpickRawTable || target == adpickSnapshotTable
 }
 
 func (p *ClickHouseRawPublisher) markRawOutboxReplayed(outboxUUIDs []string) error {
+	return p.markRawOutboxReplayedWithGuard(outboxUUIDs, false)
+}
+
+func (p *ClickHouseRawPublisher) markRawOutboxReplayedWithGuard(outboxUUIDs []string, guardEndpoint bool) error {
 	if len(outboxUUIDs) == 0 {
 		return nil
 	}
@@ -596,10 +615,18 @@ func (p *ClickHouseRawPublisher) markRawOutboxReplayed(outboxUUIDs []string) err
 	}
 	// Recovery is manual-only and bounded. One synchronous mutation acknowledges
 	// the whole run; healthy first inserts never execute an outbox mutation.
+	guard := ""
+	if guardEndpoint {
+		predicate, err := adpickEndpointGuard(p.cfg.DirectEndpointHostname)
+		if err != nil {
+			return err
+		}
+		guard = " AND " + predicate
+	}
 	sql := fmt.Sprintf(`ALTER TABLE %s
 UPDATE replayed_at = now64(3, 'Asia/Seoul')
-WHERE outbox_uuid IN (%s)
-SETTINGS mutations_sync = 1`, p.cfg.OutboxTable, strings.Join(values, ", "))
+WHERE outbox_uuid IN (%s)%s
+SETTINGS mutations_sync = 1`, p.cfg.OutboxTable, strings.Join(values, ", "), guard)
 	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.AttemptTimeout)
 	defer cancel()
 	return p.exec(ctx, sql)

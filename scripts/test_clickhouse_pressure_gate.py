@@ -182,6 +182,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
                 workflow.index("- name: Replay bounded Shopping raw outbox"),
                 workflow.index("- name: Run crawler"),
                 workflow.index("- name: Run detail enrichment shard"),
+                workflow.index("- name: Collect verify and publish travel and services catalogs"),
                 *(
                     offset
                     for offset in range(len(workflow))
@@ -189,8 +190,8 @@ class ClickHousePressureGateTest(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(len(gate_offsets), 5)
-        self.assertEqual(len(writer_offsets), 5)
+        self.assertEqual(len(gate_offsets), 6)
+        self.assertEqual(len(writer_offsets), 6)
         for gate_offset, writer_offset in zip(gate_offsets, writer_offsets):
             self.assertLess(gate_offset, writer_offset)
         self.assertEqual(
@@ -203,7 +204,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn('CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"', workflow)
         self.assertNotIn("CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_", workflow)
-        self.assertEqual(workflow.count("CLICKHOUSE_PRESSURE_GATE_TARGETS: >-"), 5)
+        self.assertEqual(workflow.count("CLICKHOUSE_PRESSURE_GATE_TARGETS: >-"), 6)
         self.assertIn("local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history", workflow)
         self.assertIn("local:Data_Shopping_Raw.kurly_product_raw_endpoint_history", workflow)
         self.assertIn("local:Data_Shopping_Log.shopping_raw_direct_insert_outbox", workflow)
