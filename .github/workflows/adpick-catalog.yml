@@ -114,6 +114,15 @@ jobs:
               if (run.id === context.runId || run.head_branch !== 'main' ||
                   run.path !== '.github/workflows/adpick-catalog.yml' ||
                   run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) continue;
+              const jobs = (await github.rest.actions.listJobsForWorkflowRun({
+                ...repository, run_id: run.id, per_page: 10})).data.jobs;
+              const executed = jobs.some(job =>
+                job.steps?.some(step => step.name === 'Run tests' && step.conclusion === 'success') &&
+                job.steps?.some(step =>
+                  ['Collect verify and publish travel and services catalogs', 'Replay verified prior harvest'].includes(step.name) &&
+                  ['success', 'failure', 'cancelled'].includes(step.conclusion)));
+              // Artifacts from a failed test setup are never collection input.
+              if (!executed) continue;
               const artifacts = (await github.rest.actions.listWorkflowRunArtifacts({
                 ...repository, run_id: run.id, per_page: 20})).data.artifacts;
               const artifact = artifacts.find(item => !item.expired &&
