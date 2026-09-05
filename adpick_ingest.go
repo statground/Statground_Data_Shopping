@@ -282,17 +282,25 @@ func adpickCanonicalRecords(records []adpickCatalogRecord) ([]byte, error) {
 	return json.Marshal(ordered)
 }
 
+func (pub *ClickHouseRawPublisher) adpickReadbackQuery(table string, first adpickCatalogRecord, count int) (string, error) {
+	if (table != adpickRawTable && table != adpickSnapshotTable) || count < 1 || count > adpickMaximumQueries*20+8 {
+		return "", fmt.Errorf("invalid Adpick verification scope")
+	}
+	if !rawOutboxUUIDPattern.MatchString(first.CollectRunUUID) || (first.Vertical != "travel" && first.Vertical != "services") {
+		return "", fmt.Errorf("invalid Adpick verification identity")
+	}
+	// Qualify stored UUID columns so ClickHouse cannot substitute the String
+	// output alias into the typed UUID predicate (NO_COMMON_TYPE, code 386).
+	query := fmt.Sprintf("SELECT %s FROM %s AS catalog WHERE catalog.collect_run_uuid = toUUID('%s') AND catalog.vertical = '%s' AND catalog.version = %d ORDER BY item_key LIMIT %d SETTINGS max_threads = 1, max_execution_time = 15 FORMAT JSONEachRow",
+		adpickRecordColumns, table, first.CollectRunUUID, first.Vertical, first.Version, count+1)
+	return pub.adpickGuardedRead(query)
+}
+
 func verifyAdpickRecords(ctx context.Context, pub *ClickHouseRawPublisher, table string, expected []adpickCatalogRecord) error {
-	if (table != adpickRawTable && table != adpickSnapshotTable) || len(expected) == 0 || len(expected) > adpickMaximumQueries*20+8 {
+	if len(expected) == 0 {
 		return fmt.Errorf("invalid Adpick verification scope")
 	}
-	first := expected[0]
-	if !rawOutboxUUIDPattern.MatchString(first.CollectRunUUID) || (first.Vertical != "travel" && first.Vertical != "services") {
-		return fmt.Errorf("invalid Adpick verification identity")
-	}
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE collect_run_uuid = toUUID('%s') AND vertical = '%s' AND version = %d ORDER BY item_key LIMIT %d SETTINGS max_threads = 1, max_execution_time = 15 FORMAT JSONEachRow",
-		adpickRecordColumns, table, first.CollectRunUUID, first.Vertical, first.Version, len(expected)+1)
-	query, err := pub.adpickGuardedRead(query)
+	query, err := pub.adpickReadbackQuery(table, expected[0], len(expected))
 	if err != nil {
 		return err
 	}

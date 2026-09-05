@@ -415,6 +415,22 @@ func TestAdpickPublicationLocalClickHouse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("local fixture insert: %v %s", err, output)
 			}
+			if failure == "" {
+				if output, err := run(path, "CREATE DATABASE Data_Shopping_Raw; CREATE TABLE "+adpickRawTable+" AS "+adpickSnapshotTable+"; INSERT INTO "+adpickRawTable+" SELECT * FROM "+adpickSnapshotTable, ""); err != nil {
+					t.Fatalf("local raw fixture: %v %s", err, output)
+				}
+				for _, table := range []string{adpickRawTable, adpickSnapshotTable} {
+					readback, err := pub.adpickReadbackQuery(table, records[0], len(records))
+					if err != nil {
+						t.Fatal(err)
+					}
+					output, err := run(path, readback, "")
+					var row adpickCatalogRecord
+					if err != nil || json.Unmarshal(output, &row) != nil || row.CollectRunUUID != adpickTestRun || row.Title != records[0].Title {
+						t.Fatalf("actual typed readback %s: %v %s", table, err, output)
+					}
+				}
+			}
 			markerParts := strings.SplitN(string(body), "FORMAT JSONEachRow\n", 2)
 			output, err = run(path, markerParts[0]+"FORMAT JSONEachRow", markerParts[1])
 			if failure == "" {
