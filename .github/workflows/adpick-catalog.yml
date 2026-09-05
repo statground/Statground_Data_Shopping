@@ -27,7 +27,9 @@ jobs:
     env:
       INGEST_MODE: clickhouse
       ADPICK_COLLECT_ONLY: 'true'
-      ADPICK_QUERY_PROFILE: expanded
+      # First prove actual provider coverage; focused=60 and expanded=240 are
+      # available after the diagnostic merchant/title evidence is reviewed.
+      ADPICK_QUERY_PROFILE: ${{ vars.ADPICK_QUERY_PROFILE || 'diagnostic' }}
       ADPICK_SEARCH_LIMIT: '20'
       ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json

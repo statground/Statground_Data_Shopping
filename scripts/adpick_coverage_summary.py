@@ -11,6 +11,7 @@ def render(report):
                        ("API attempts", "request_attempts"), ("Retries", "retries")]:
         lines.append(f"- {label}: {int(report.get(key, 0))}")
     for label, key in [("Complete upstream batch", "collection_complete"),
+                       ("Verified merchant directory", "discovery_complete"),
                        ("Verified ClickHouse publication", "publication_complete"),
                        ("Offer target reached", "coverage_target_met")]:
         lines.append(f"- {label}: {report.get(key) is True}")
@@ -28,6 +29,12 @@ def render(report):
         lines.extend(["", "The source did not supply the target number of eligible offers. "
                       "Mall directory membership does not prove product-search support; "
                       "excluded merchants are never relabeled as travel or services."])
+    lines.extend(["", f"Retained earlier offers: {int(report.get('retained_previous_offers', 0))}",
+                  f"Evicted oldest offers at bounded capacity: {int(report.get('evicted_oldest_offers', 0))}"])
+    for query in report.get("queries", []):
+        # Fields and two short title samples are sanitized by the collector.
+        lines.extend(["", "```json", json.dumps({key: query.get(key) for key in
+                     ("keyword", "vertical", "returned", "returned_merchant_codes", "samples")}, ensure_ascii=False), "```"])
     return "\n".join(lines) + "\n"
 
 

@@ -60,12 +60,13 @@ type adpickMall struct {
 }
 
 type adpickOffer struct {
-	Code  string `json:"cp_code"`
-	Name  string `json:"cp_name"`
-	Title string `json:"title"`
-	Price string `json:"price"`
-	Photo string `json:"photo"`
-	Link  string `json:"commissionlink"`
+	FieldTypes map[string]string `json:"-"`
+	Code       string            `json:"cp_code"`
+	Name       string            `json:"cp_name"`
+	Title      string            `json:"title"`
+	Price      string            `json:"price"`
+	Photo      string            `json:"photo"`
+	Link       string            `json:"commissionlink"`
 }
 
 type adpickCatalogRecord struct {
@@ -95,8 +96,12 @@ func adpickQueriesFromEnv() ([]adpickQuery, error) {
 	profile := envString("ADPICK_QUERY_PROFILE", "standard")
 	if profile == "expanded" {
 		queries = expandedAdpickQueries()
+	} else if profile == "focused" {
+		queries = expandedAdpickQueries()[:60]
+	} else if profile == "diagnostic" {
+		queries = diagnosticAdpickQueries()
 	} else if profile != "standard" {
-		return nil, fmt.Errorf("ADPICK_QUERY_PROFILE must be standard or expanded")
+		return nil, fmt.Errorf("ADPICK_QUERY_PROFILE must be standard, focused, expanded or diagnostic")
 	}
 	if raw != "" {
 		if len(raw) > 64*1024 || json.Unmarshal([]byte(raw), &queries) != nil {
@@ -110,7 +115,7 @@ func adpickQueriesFromEnv() ([]adpickQuery, error) {
 	for i := range queries {
 		q := &queries[i]
 		q.Keyword = strings.TrimSpace(q.Keyword)
-		if !validAdpickCategory(q.Vertical, q.Category) || q.Keyword == "" || len([]rune(q.Keyword)) > 100 || strings.ContainsAny(q.Keyword, "\r\n\t") {
+		if !validAdpickQuery(*q) || q.Keyword == "" || len([]rune(q.Keyword)) > 100 || strings.ContainsAny(q.Keyword, "\r\n\t") {
 			return nil, fmt.Errorf("invalid Adpick query at index %d", i)
 		}
 		id := q.Vertical + ":" + q.Category + ":" + q.Keyword
@@ -212,7 +217,7 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	}
 	requested := map[string]bool{}
 	for _, q := range queries {
-		if !validAdpickCategory(q.Vertical, q.Category) || strings.TrimSpace(q.Keyword) == "" {
+		if !validAdpickQuery(q) || strings.TrimSpace(q.Keyword) == "" {
 			return nil, fmt.Errorf("invalid Adpick category")
 		}
 		requested[q.Vertical] = true
@@ -249,18 +254,25 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			report.Merchants[identity.Key] = adpickMerchantCoverage{Code: mall.Code, Vertical: identity.Vertical}
 		}
 	}
+	if report != nil {
+		report.DiscoveryComplete = true
+	}
 	seenOffers := map[string]bool{}
 	for _, q := range queries {
 		stats := adpickQueryCoverage{Vertical: q.Vertical, Category: q.Category, Keyword: q.Keyword}
 		var offers []adpickOffer
 		if err := client.request(ctx, "search", url.Values{"q": {q.Keyword}, "limit": {strconv.Itoa(limit)}}, &offers); err != nil {
-			return nil, err
+			return records, err
 		}
 		if len(offers) > limit {
-			return nil, fmt.Errorf("Adpick search exceeds requested limit")
+			return records, fmt.Errorf("Adpick search exceeds requested limit")
 		}
 		stats.Returned = len(offers)
+		stats.MerchantCodes = map[string]int{}
+		queryRecords := []adpickCatalogRecord{}
+		querySeen := map[string]bool{}
 		for _, offer := range offers {
+			stats.observe(offer, client.key)
 			merchant, eligible := byCode[offer.Code]
 			if !eligible || merchant.Vertical != q.Vertical {
 				stats.Excluded++
@@ -269,7 +281,7 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			if offer.Name != "" {
 				identity, found := adpickMerchantNames[normalizedAdpickName(offer.Name)]
 				if !found || identity.Key != merchant.MerchantKey {
-					return nil, fmt.Errorf("Adpick offer merchant mismatch")
+					return records, fmt.Errorf("Adpick offer merchant mismatch")
 				}
 			}
 			title, link := adpickText(offer.Title, 300), safeAdpickURL(offer.Link, true)
@@ -279,23 +291,29 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			}
 			// This is an affiliate-link identity, not an original product ID or comparable booking quote.
 			key := fmt.Sprintf("%x", sha256.Sum256([]byte(offer.Code+"\x1f"+link)))
-			if seenOffers[key] {
+			if seenOffers[key] || querySeen[key] {
 				stats.Duplicates++
 				continue
 			}
-			seenOffers[key] = true
+			querySeen[key] = true
 			record := merchant
 			record.RecordType, record.ItemKey, record.CategorySlug = "offer", key, q.Category
 			record.Title, record.Description, record.ImageURL, record.AffiliateURL = title, "", safeAdpickURL(offer.Photo, false), link
 			record.PriceText, record.PriceKRW, record.SearchKeyword = adpickText(offer.Price, 100), adpickPrice(offer.Price), q.Keyword
-			records = append(records, record)
+			queryRecords = append(queryRecords, record)
 			stats.NewOffers++
+		}
+		// Commit a whole validated search; a malformed later item must not leave
+		// half a query in the harvested records or the coverage counters.
+		for _, record := range queryRecords {
+			records = append(records, record)
+			seenOffers[record.ItemKey] = true
 			if report != nil {
 				report.OffersByVertical[q.Vertical]++
 				report.OffersByCategory[q.Vertical+"/"+q.Category]++
-				m := report.Merchants[merchant.MerchantKey]
+				m := report.Merchants[record.MerchantKey]
 				m.Offers++
-				report.Merchants[merchant.MerchantKey] = m
+				report.Merchants[record.MerchantKey] = m
 			}
 		}
 		if report != nil {
@@ -304,7 +322,7 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			fmt.Printf("[adpick] query=%d/%d vertical=%s category=%s returned=%d new=%d duplicates=%d excluded=%d invalid=%d\n", report.QueriesCompleted, len(queries), q.Vertical, q.Category, stats.Returned, stats.NewOffers, stats.Duplicates, stats.Excluded, stats.Invalid)
 			if client.progress != nil {
 				if err := client.progress(); err != nil {
-					return nil, err
+					return records, err
 				}
 			}
 		}

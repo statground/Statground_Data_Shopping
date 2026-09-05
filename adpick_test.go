@@ -91,7 +91,7 @@ func TestAdpickCatalogRetainsDirectoryWithSuccessfulEmptySearch(t *testing.T) {
 	}
 }
 
-func TestAdpickUnsuccessfulSearchRejectsWholeBatchWithoutSecrets(t *testing.T) {
+func TestAdpickUnsuccessfulSearchPreservesVerifiedDirectoryWithoutSecrets(t *testing.T) {
 	client := adpickFixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/malls") {
 			_, _ = io.WriteString(w, `{"success":true,"data":[{"cp_code":"T","name":"트립닷컴"}]}`)
@@ -100,7 +100,7 @@ func TestAdpickUnsuccessfulSearchRejectsWholeBatchWithoutSecrets(t *testing.T) {
 		_, _ = io.WriteString(w, `{"success":false,"message":"fixture-secret invalid","data":[]}`)
 	})
 	records, err := collectAdpickCatalog(context.Background(), client, defaultAdpickQueries[:1], 20, adpickTestRun, NowKST())
-	if err == nil || records != nil || strings.Contains(err.Error(), "fixture-secret") {
+	if err == nil || len(records) != 1 || records[0].RecordType != "merchant" || strings.Contains(err.Error(), "fixture-secret") {
 		t.Fatalf("records=%v error=%v", records, err)
 	}
 }
@@ -124,7 +124,7 @@ func TestAdpickRejectsRedirectAndMerchantMismatch(t *testing.T) {
 			_, _ = io.WriteString(w, `{"success":true,"data":[{"cp_code":"T","cp_name":"쿠팡","title":"bad","commissionlink":"https://bitl.bz/offer"}]}`)
 		})
 		records, err := collectAdpickCatalog(context.Background(), client, defaultAdpickQueries[:1], 20, adpickTestRun, NowKST())
-		if err == nil || records != nil {
+		if err == nil || len(records) != 1 || records[0].RecordType != "merchant" {
 			t.Fatalf("records=%v error=%v", records, err)
 		}
 	})
@@ -229,7 +229,7 @@ func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
 		t.Fatal("missing Adpick job")
 	}
 	job := text[start:]
-	for _, required := range []string{"vars.ADPICK_CATALOG_ENABLED != 'false'", "secrets.ADPICK_API", `ADPICK_COLLECT_ONLY: 'true'`, "ADPICK_QUERY_PROFILE: expanded", "adpick_coverage_summary.py", "actions/upload-artifact@v4", "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
+	for _, required := range []string{"vars.ADPICK_CATALOG_ENABLED != 'false'", "secrets.ADPICK_API", `ADPICK_COLLECT_ONLY: 'true'`, "vars.ADPICK_QUERY_PROFILE || 'diagnostic'", "adpick_coverage_summary.py", "actions/upload-artifact@v4", "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
 		if !strings.Contains(job, required) {
 			t.Errorf("missing workflow contract %s", required)
 		}

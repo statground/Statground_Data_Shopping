@@ -86,8 +86,9 @@ func (p *ClickHouseRawPublisher) adpickGuardedRead(query string) (string, error)
 	return "SELECT * FROM (" + query + ") WHERE " + guard + format, nil
 }
 
-func RunAdpickCatalogFromEnv(ctx context.Context) (resultErr error) {
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
+	// Reserve publication time even when a bounded search harvest times out.
+	ctx, cancel := context.WithTimeout(parent, 35*time.Minute)
 	defer cancel()
 	if !ShouldWriteClickHouse() {
 		return fmt.Errorf("Adpick collection requires INGEST_MODE=clickhouse")
@@ -104,7 +105,7 @@ func RunAdpickCatalogFromEnv(ctx context.Context) (resultErr error) {
 	client.coverage = report
 	client.progress = func() error { return writeAdpickCoverage(report, client) }
 	defer func() {
-		if resultErr != nil {
+		if resultErr != nil && report.Failure == "" {
 			report.Failure = "collection_or_publication_failed"
 		}
 		if err := writeAdpickCoverage(report, client); err != nil && resultErr == nil {
@@ -124,27 +125,29 @@ func RunAdpickCatalogFromEnv(ctx context.Context) (resultErr error) {
 	}
 	runUUID := envString("ADPICK_RUN_UUID", NewUUIDv7())
 	report.RunUUID = runUUID
-	// A complete upstream batch is validated before any public or raw write.
-	records, err := collectAdpickCatalog(ctx, client, queries, limit, runUUID, NowKST())
-	if err != nil {
-		return err
+	records, searchErr := collectAdpickCatalog(ctx, client, queries, limit, runUUID, NowKST())
+	cancel()
+	if searchErr != nil {
+		report.Failure = "search_incomplete"
 	}
-	if len(records) == 0 {
-		return fmt.Errorf("Adpick returned no eligible merchants; existing catalogs retained")
-	}
-	// The API phase can last 25 minutes. Recheck the actual write boundary,
-	// rather than relying on the workflow's now-stale startup pressure check.
-	if err := runAdpickPublicationGate(ctx, pub); err != nil {
-		return err
-	}
-	if err := preflightAdpickCatalog(ctx, pub); err != nil {
-		return err
-	}
-	if err := publishAdpickCatalog(ctx, pub, records); err != nil {
-		return err
-	}
-	report.PublicationComplete = true
-	return nil
+	return finishAdpickHarvest(parent, report, records, searchErr, func(publishCtx context.Context, harvested []adpickCatalogRecord) error {
+		if err := runAdpickPublicationGate(publishCtx, pub); err != nil {
+			return err
+		}
+		if err := preflightAdpickCatalog(publishCtx, pub); err != nil {
+			return err
+		}
+		previous, err := readPreviousAdpickCatalog(publishCtx, pub)
+		if err != nil {
+			return err
+		}
+		merged, retained, evicted, err := mergeAdpickHarvest(harvested, previous)
+		if err != nil {
+			return err
+		}
+		report.RetainedOffers, report.EvictedOffers = retained, evicted
+		return publishAdpickCatalog(publishCtx, pub, merged)
+	})
 }
 
 func adpickPublicationGateEnv(pub *ClickHouseRawPublisher) []string {
@@ -436,8 +439,14 @@ func publishAdpickCatalog(ctx context.Context, pub *ClickHouseRawPublisher, reco
 			return err
 		}
 		first := selected[0]
+		sourceMaxCollectedAt := first.CollectedAt
+		for _, record := range selected {
+			if record.CollectedAt > sourceMaxCollectedAt {
+				sourceMaxCollectedAt = record.CollectedAt
+			}
+		}
 		marker := map[string]any{"refresh_uuid": NewUUIDv7(), "vertical": vertical, "version": first.Version, "collect_run_uuid": first.CollectRunUUID,
-			"generated_at": generatedAt, "source_max_collected_at": first.CollectedAt, "published_at": FormatCHDateTime64Millis(NowKST()),
+			"generated_at": generatedAt, "source_max_collected_at": sourceMaxCollectedAt, "published_at": FormatCHDateTime64Millis(NowKST()),
 			"expected_merchant_count": merchants, "merchant_count": merchants, "offer_count": offers, "row_count": len(selected),
 			"content_sha256": fmt.Sprintf("%x", sha256.Sum256(canonical))}
 		body, err := adpickPublicationBody(pub, selected, marker)

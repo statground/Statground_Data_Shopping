@@ -10,14 +10,16 @@ import (
 )
 
 type adpickQueryCoverage struct {
-	Vertical   string `json:"vertical"`
-	Category   string `json:"category"`
-	Keyword    string `json:"keyword"`
-	Returned   int    `json:"returned"`
-	NewOffers  int    `json:"new_offers"`
-	Duplicates int    `json:"duplicates"`
-	Excluded   int    `json:"excluded_merchant_or_vertical"`
-	Invalid    int    `json:"invalid_title_or_link"`
+	Vertical      string                   `json:"vertical"`
+	Category      string                   `json:"category"`
+	Keyword       string                   `json:"keyword"`
+	Returned      int                      `json:"returned"`
+	NewOffers     int                      `json:"new_offers"`
+	Duplicates    int                      `json:"duplicates"`
+	Excluded      int                      `json:"excluded_merchant_or_vertical"`
+	Invalid       int                      `json:"invalid_title_or_link"`
+	MerchantCodes map[string]int           `json:"returned_merchant_codes"`
+	Samples       []adpickDiagnosticSample `json:"samples,omitempty"`
 }
 
 type adpickMerchantCoverage struct {
@@ -35,6 +37,9 @@ type adpickCoverage struct {
 	Requests            int                               `json:"request_attempts"`
 	Retries             int                               `json:"retries"`
 	CollectionComplete  bool                              `json:"collection_complete"`
+	DiscoveryComplete   bool                              `json:"discovery_complete"`
+	RetainedOffers      int                               `json:"retained_previous_offers"`
+	EvictedOffers       int                               `json:"evicted_oldest_offers"`
 	PublicationComplete bool                              `json:"publication_complete"`
 	TargetMet           bool                              `json:"coverage_target_met"`
 	Failure             string                            `json:"failure,omitempty"`
