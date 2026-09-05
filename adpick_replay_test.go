@@ -157,6 +157,8 @@ func TestAdpickReplayValidDigestDoesNotAuthorizeInvalidRecords(t *testing.T) {
 }
 
 func TestAdpickReplayPreservesNewerPublishedPriceAndCollectionStatus(t *testing.T) {
+	coveragePath := filepath.Join(t.TempDir(), "replay-coverage.json")
+	t.Setenv("ADPICK_COVERAGE_REPORT", coveragePath)
 	harvest, now := replayTestHarvest()
 	previous := append([]adpickCatalogRecord(nil), harvest.Records...)
 	for i := range previous {
@@ -209,6 +211,11 @@ func TestAdpickReplayPreservesNewerPublishedPriceAndCollectionStatus(t *testing.
 	}
 	if harvest.Records[1].PriceText != "19,900원" || harvest.Records[0].CollectRunUUID != adpickTestRun {
 		t.Fatal("replay mutated source artifact")
+	}
+	body, err := os.ReadFile(coveragePath)
+	var report adpickCoverage
+	if err != nil || json.Unmarshal(body, &report) != nil || !report.PublicationComplete || report.CollectionComplete || report.Requests != 0 || len(report.Merchants) != 1 || report.OffersByVertical["travel"] != 1 {
+		t.Fatal("replay coverage misreported source collection or verified publication")
 	}
 }
 

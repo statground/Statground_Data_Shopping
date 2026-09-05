@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-var adpickGateDiagnosticPattern = regexp.MustCompile(`^(?:ClickHouse write pressure gate ok [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate deferred this run: [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate failed closed: ClickHouse pressure query (?:failed status=[0-9]+|transport failed category=[A-Za-z]+))$`)
+var adpickGateDiagnosticPattern = regexp.MustCompile(`^(?:ClickHouse write pressure gate ok [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate deferred this run: [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate failed closed: (?:ClickHouse pressure query (?:failed status=[0-9]+|transport failed category=[A-Za-z]+)|invalid CLICKHOUSE_PRESSURE_GATE_TARGETS target(?: count)?|duplicate CLICKHOUSE_PRESSURE_GATE_TARGETS target))$`)
 
 func waitAdpickPublicationGate(ctx context.Context, run func(context.Context) ([]byte, error), sleep func(context.Context, time.Duration) error) error {
 	for attempt := 0; attempt < 4; attempt++ {

@@ -257,6 +257,20 @@ func replayAdpickHarvest(ctx context.Context, harvest *adpickReplayHarvest, runU
 	if err := ops.publish(ctx, merged); err != nil {
 		return err
 	}
+	report.PublicationComplete = true
+	for _, row := range merged {
+		merchant := report.Merchants[row.MerchantKey]
+		merchant.Code, merchant.Vertical = row.MerchantCode, row.Vertical
+		if row.RecordType == "offer" {
+			merchant.Offers++
+			report.OffersByVertical[row.Vertical]++
+			report.OffersByCategory[row.Vertical+"/"+row.CategorySlug]++
+		}
+		report.Merchants[row.MerchantKey] = merchant
+	}
+	if err := writeAdpickCoverage(report, &adpickClient{}); err != nil {
+		return err
+	}
 	fmt.Printf("[adpick] verified harvest replay published records=%d source_queries_completed=%d; original collection completeness unchanged\n", len(merged), harvest.Completed)
 	return nil
 }

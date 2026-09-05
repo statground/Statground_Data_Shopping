@@ -158,13 +158,18 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 }
 
 func adpickPublicationGateEnv(pub *ClickHouseRawPublisher) []string {
+	outboxTarget := pub.cfg.OutboxTable
+	if rawQuotedTablePattern.MatchString(outboxTarget) {
+		// The SQL client quotes identifiers; the gate accepts canonical DB.table.
+		outboxTarget = strings.ReplaceAll(outboxTarget, "`", "")
+	}
 	overrides := map[string]string{
 		"CLICKHOUSE_HOST": pub.cfg.URL, "CLICKHOUSE_PORT": "", "CLICKHOUSE_PROTOCOL": "", "CLICKHOUSE_HTTP_URL_PATH": "",
 		"CLICKHOUSE_USER": pub.cfg.User, "CLICKHOUSE_PASSWORD": pub.cfg.Password,
 		"CH_HOST": pub.cfg.URL, "CH_PORT": "", "CH_PROTOCOL": "", "CH_HTTP_URL_PATH": "",
 		"CH_USER": pub.cfg.User, "CH_PASSWORD": pub.cfg.Password,
 		"CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME": pub.cfg.DirectEndpointHostname,
-		"CLICKHOUSE_PRESSURE_GATE_TARGETS":    "local:" + adpickRawTable + ",local:" + adpickSnapshotTable + ",local:" + adpickPublishedTable + ",local:" + pub.cfg.OutboxTable,
+		"CLICKHOUSE_PRESSURE_GATE_TARGETS":    "local:" + adpickRawTable + ",local:" + adpickSnapshotTable + ",local:" + adpickPublishedTable + ",local:" + outboxTarget,
 	}
 	env := []string{}
 	for _, entry := range os.Environ() {

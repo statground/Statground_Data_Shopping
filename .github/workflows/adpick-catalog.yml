@@ -105,15 +105,30 @@ jobs:
               throw new Error('Invalid replay run ID');
             }
             const repository = {owner: context.repo.owner, repo: context.repo.repo};
+            const owned = run => run.id !== context.runId && run.head_branch === 'main' &&
+              run.path === '.github/workflows/adpick-catalog.yml' &&
+              run.head_repository?.full_name === `${context.repo.owner}/${context.repo.repo}`;
+            let publishedCutoff = 0;
+            if (!requested) {
+              const successes = (await github.rest.actions.listWorkflowRuns({...repository,
+                workflow_id: 'adpick-catalog.yml', status: 'success', per_page: 5})).data.workflow_runs;
+              for (const run of successes.filter(owned)) {
+                const jobs = (await github.rest.actions.listJobsForWorkflowRun({
+                  ...repository, run_id: run.id, per_page: 10})).data.jobs;
+                if (jobs.some(job => job.steps?.some(step =>
+                    ['Collect verify and publish travel and services catalogs', 'Replay verified prior harvest'].includes(step.name) &&
+                    step.conclusion === 'success'))) {
+                  publishedCutoff = Math.max(publishedCutoff, run.id);
+                }
+              }
+            }
             const runs = requested
               ? [(await github.rest.actions.getWorkflowRun({...repository, run_id: Number(requested)})).data]
               : (await github.rest.actions.listWorkflowRuns({...repository,
                   workflow_id: 'adpick-catalog.yml', status: 'failure', per_page: 5})).data.workflow_runs;
             let found = false;
             for (const run of runs) {
-              if (run.id === context.runId || run.head_branch !== 'main' ||
-                  run.path !== '.github/workflows/adpick-catalog.yml' ||
-                  run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) continue;
+              if (!owned(run) || (!requested && run.id <= publishedCutoff)) continue;
               const jobs = (await github.rest.actions.listJobsForWorkflowRun({
                 ...repository, run_id: run.id, per_page: 10})).data.jobs;
               const executed = jobs.some(job =>
@@ -147,12 +162,15 @@ jobs:
           path: /tmp/adpick-replay
 
       - name: Replay verified prior harvest
+        id: replay
         run: |
           if test -f /tmp/adpick-replay/adpick-harvest.json; then
             ADPICK_REPLAY_HARVEST_FILE=/tmp/adpick-replay/adpick-harvest.json go run .
+            echo 'published=true' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Gate ClickHouse catalog writes on storage pressure
+        if: ${{ steps.replay.outputs.published != 'true' }}
         env:
           CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
             local:Data_Shopping_Raw.adpick_vertical_catalog_raw_endpoint_history,
@@ -162,6 +180,7 @@ jobs:
         run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Collect verify and publish travel and services catalogs
+        if: ${{ steps.replay.outputs.published != 'true' }}
         env:
           ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
         run: go run .

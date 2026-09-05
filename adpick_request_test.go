@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -196,5 +197,28 @@ func TestAdpickPublicationGateUsesExactWriterEndpointAndTargets(t *testing.T) {
 	}
 	if strings.Contains(env["CLICKHOUSE_PRESSURE_GATE_TARGETS"], "Other") {
 		t.Fatal("unrelated gate target inherited")
+	}
+}
+
+func TestAdpickRealPublisherConfigurationPassesPythonGateTargetParser(t *testing.T) {
+	for key, value := range map[string]string{"CLICKHOUSE_HOST": "127.0.0.1", "CLICKHOUSE_PORT": "8123", "CLICKHOUSE_PROTOCOL": "http", "CLICKHOUSE_USER": "fixture", "CLICKHOUSE_PASSWORD": "fixture-password", "CLICKHOUSE_HTTP_URL_PATH": "/", "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME": "clickhouse-s1-r1", "SHOPPING_RAW_DIRECT_OUTBOX_TABLE": defaultShoppingRawOutboxTable} {
+		t.Setenv(key, value)
+	}
+	pub, err := NewClickHouseRawPublisherFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rawQuotedTablePattern.MatchString(pub.cfg.OutboxTable) {
+		t.Fatal("fixture did not exercise SQL-quoted configuration")
+	}
+	command := exec.Command("python3", "-c", `import importlib.util,os
+s=importlib.util.spec_from_file_location("gate","scripts/clickhouse_pressure_gate.py")
+m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+t=m.load_targets(os.environ)
+assert len(t)==4 and t[-1]==("local","Data_Shopping_Log","shopping_raw_direct_insert_outbox")
+print("validated 4 targets without network access")`)
+	command.Env = adpickPublicationGateEnv(pub)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("real Go configuration rejected by Python gate: %s %v", output, err)
 	}
 }
