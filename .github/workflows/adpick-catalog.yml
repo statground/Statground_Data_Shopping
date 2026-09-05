@@ -86,6 +86,11 @@ jobs:
           go mod verify
 
       - name: Run tests
+        env:
+          ADPICK_QUERY_PROFILE: standard
+          ADPICK_SEARCH_QUERIES_JSON: ''
+          ADPICK_HARVEST_FILE: ''
+          ADPICK_COVERAGE_REPORT: ''
         run: go test ./...
 
       - name: Find prior failed harvest

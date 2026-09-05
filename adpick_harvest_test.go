@@ -30,6 +30,7 @@ func TestAdpickDirectoryProfileCollectsBothVerticalsWithoutSearching(t *testing.
 		fmt.Fprint(w, `{"success":true,"data":[{"cp_code":"T","name":"트립닷컴","commissionlink":"https://bitl.bz/travel"},{"cp_code":"K","name":"크몽","commissionlink":"https://bitl.bz/service"},{"cp_code":"B","name":"교보문고"}]}`)
 	})
 	client.coverage = newAdpickCoverage(0)
+	client.directoryOnly = true
 	records, err := collectAdpickCatalog(context.Background(), client, queries, 20, adpickTestRun, NowKST())
 	if err != nil || requests != 1 || len(records) != 2 || !client.coverage.DiscoveryComplete || !client.coverage.CollectionComplete || client.coverage.QueriesCompleted != 0 {
 		t.Fatalf("directory requests=%d records=%d coverage=%+v err=%v", requests, len(records), client.coverage, err)

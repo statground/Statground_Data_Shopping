@@ -211,7 +211,7 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	if limit < 1 || limit > 20 {
 		return nil, fmt.Errorf("ADPICK_SEARCH_LIMIT must be between 1 and 20")
 	}
-	directoryOnly := envString("ADPICK_QUERY_PROFILE", "standard") == "directory"
+	directoryOnly := client.directoryOnly
 	if !rawOutboxUUIDPattern.MatchString(runUUID) || (len(queries) == 0 && !directoryOnly) || len(queries) > adpickMaximumQueries || (directoryOnly && len(queries) != 0) {
 		return nil, fmt.Errorf("invalid Adpick collection bounds")
 	}

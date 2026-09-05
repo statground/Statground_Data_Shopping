@@ -104,6 +104,7 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	client.directoryOnly = envString("ADPICK_QUERY_PROFILE", "standard") == "directory"
 	report := newAdpickCoverage(len(queries))
 	client.coverage = report
 	client.progress = func() error { return writeAdpickCoverage(report, client) }
