@@ -234,7 +234,9 @@ func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
 			t.Errorf("missing workflow contract %s", required)
 		}
 	}
-	if strings.Index(job, "Gate ClickHouse catalog writes") > strings.Index(job, "Collect verify and publish") {
+	gate := strings.Index(job, "\n      - name: Gate ClickHouse catalog writes on storage pressure\n")
+	collect := strings.Index(job, "\n      - name: Collect verify and publish travel and services catalogs\n")
+	if gate < 0 || collect < 0 || gate > collect {
 		t.Fatal("writer starts before pressure gate")
 	}
 	pub := &ClickHouseRawPublisher{}
