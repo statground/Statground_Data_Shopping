@@ -94,6 +94,12 @@ func adpickQueriesFromEnv() ([]adpickQuery, error) {
 	raw := envString("ADPICK_SEARCH_QUERIES_JSON", "")
 	queries := append([]adpickQuery(nil), defaultAdpickQueries...)
 	profile := envString("ADPICK_QUERY_PROFILE", "standard")
+	if profile == "directory" {
+		if raw != "" {
+			return nil, fmt.Errorf("Adpick directory profile cannot include search queries")
+		}
+		return nil, nil
+	}
 	if profile == "expanded" {
 		queries = expandedAdpickQueries()
 	} else if profile == "focused" {
@@ -101,7 +107,7 @@ func adpickQueriesFromEnv() ([]adpickQuery, error) {
 	} else if profile == "diagnostic" {
 		queries = diagnosticAdpickQueries()
 	} else if profile != "standard" {
-		return nil, fmt.Errorf("ADPICK_QUERY_PROFILE must be standard, focused, expanded or diagnostic")
+		return nil, fmt.Errorf("ADPICK_QUERY_PROFILE must be standard, focused, expanded, diagnostic or directory")
 	}
 	if raw != "" {
 		if len(raw) > 64*1024 || json.Unmarshal([]byte(raw), &queries) != nil {
@@ -205,7 +211,8 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	if limit < 1 || limit > 20 {
 		return nil, fmt.Errorf("ADPICK_SEARCH_LIMIT must be between 1 and 20")
 	}
-	if !rawOutboxUUIDPattern.MatchString(runUUID) || len(queries) == 0 || len(queries) > adpickMaximumQueries {
+	directoryOnly := envString("ADPICK_QUERY_PROFILE", "standard") == "directory"
+	if !rawOutboxUUIDPattern.MatchString(runUUID) || (len(queries) == 0 && !directoryOnly) || len(queries) > adpickMaximumQueries || (directoryOnly && len(queries) != 0) {
 		return nil, fmt.Errorf("invalid Adpick collection bounds")
 	}
 	var malls []adpickMall
@@ -216,6 +223,9 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 		return nil, fmt.Errorf("Adpick mall list exceeds bounded limit")
 	}
 	requested := map[string]bool{}
+	if directoryOnly {
+		requested["travel"], requested["services"] = true, true
+	}
 	for _, q := range queries {
 		if !validAdpickQuery(q) || strings.TrimSpace(q.Keyword) == "" {
 			return nil, fmt.Errorf("invalid Adpick category")
@@ -256,6 +266,9 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	}
 	if report != nil {
 		report.DiscoveryComplete = true
+		if err := writeAdpickHarvest(records, report, client.key); err != nil {
+			return records, err
+		}
 	}
 	seenOffers := map[string]bool{}
 	for _, q := range queries {
@@ -319,6 +332,9 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 		if report != nil {
 			report.Queries = append(report.Queries, stats)
 			report.QueriesCompleted++
+			if err := writeAdpickHarvest(records, report, client.key); err != nil {
+				return records, err
+			}
 			fmt.Printf("[adpick] query=%d/%d vertical=%s category=%s returned=%d new=%d duplicates=%d excluded=%d invalid=%d\n", report.QueriesCompleted, len(queries), q.Vertical, q.Category, stats.Returned, stats.NewOffers, stats.Duplicates, stats.Excluded, stats.Invalid)
 			if client.progress != nil {
 				if err := client.progress(); err != nil {

@@ -2,6 +2,11 @@ name: Adpick Travel and Services
 
 on:
   workflow_dispatch:
+    inputs:
+      replay_run_id:
+        description: Prior Adpick run to replay before collecting (blank selects recent failed run)
+        type: string
+        required: false
   push:
     branches: [main]
     paths:
@@ -12,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 # The other Shopping workflow uses this same group: a single API collector and
 # a single writer/replayer own the shared endpoint-local outbox at a time.
@@ -23,16 +29,18 @@ jobs:
   adpick_catalog:
     if: ${{ github.event_name != 'schedule' || vars.ADPICK_CATALOG_ENABLED != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       INGEST_MODE: clickhouse
       ADPICK_COLLECT_ONLY: 'true'
-      # First prove actual provider coverage; focused=60 and expanded=240 are
-      # available after the diagnostic merchant/title evidence is reviewed.
-      ADPICK_QUERY_PROFILE: ${{ vars.ADPICK_QUERY_PROFILE || 'diagnostic' }}
+      # Actual diagnostic searches returned no eligible travel/services offers.
+      # Refresh the verified directory with one malls request and zero searches.
+      # Focused/expanded search remains opt-in through repository variables.
+      ADPICK_QUERY_PROFILE: ${{ vars.ADPICK_QUERY_PROFILE || 'directory' }}
       ADPICK_SEARCH_LIMIT: '20'
       ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
+      ADPICK_HARVEST_FILE: /tmp/adpick-harvest.json
       CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: '120'
       CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: '30'
@@ -80,6 +88,56 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Find prior failed harvest
+        id: prior
+        uses: actions/github-script@v8
+        env:
+          REQUESTED_RUN_ID: ${{ inputs.replay_run_id || '' }}
+        with:
+          script: |
+            const requested = process.env.REQUESTED_RUN_ID;
+            if (requested && !/^[1-9][0-9]{0,14}$/.test(requested)) {
+              throw new Error('Invalid replay run ID');
+            }
+            const repository = {owner: context.repo.owner, repo: context.repo.repo};
+            const runs = requested
+              ? [(await github.rest.actions.getWorkflowRun({...repository, run_id: Number(requested)})).data]
+              : (await github.rest.actions.listWorkflowRuns({...repository,
+                  workflow_id: 'adpick-catalog.yml', status: 'failure', per_page: 5})).data.workflow_runs;
+            let found = false;
+            for (const run of runs) {
+              if (run.id === context.runId || run.head_branch !== 'main' ||
+                  run.path !== '.github/workflows/adpick-catalog.yml' ||
+                  run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) continue;
+              const artifacts = (await github.rest.actions.listWorkflowRunArtifacts({
+                ...repository, run_id: run.id, per_page: 20})).data.artifacts;
+              const artifact = artifacts.find(item => !item.expired &&
+                item.name === `adpick-coverage-${run.id}-${run.run_attempt}` &&
+                item.size_in_bytes > 0 && item.size_in_bytes <= 64 * 1024 * 1024);
+              if (artifact) {
+                core.setOutput('run_id', String(run.id));
+                core.setOutput('artifact_name', artifact.name);
+                found = true;
+                break;
+              }
+            }
+            if (requested && !found) throw new Error('Replay harvest unavailable for this workflow');
+
+      - name: Download prior harvest
+        if: ${{ steps.prior.outputs.run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.prior.outputs.artifact_name }}
+          run-id: ${{ steps.prior.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/adpick-replay
+
+      - name: Replay verified prior harvest
+        run: |
+          if test -f /tmp/adpick-replay/adpick-harvest.json; then
+            ADPICK_REPLAY_HARVEST_FILE=/tmp/adpick-replay/adpick-harvest.json go run .
+          fi
+
       - name: Gate ClickHouse catalog writes on storage pressure
         env:
           CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
@@ -103,6 +161,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: adpick-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ADPICK_COVERAGE_REPORT }}
+          path: |
+            ${{ env.ADPICK_COVERAGE_REPORT }}
+            ${{ env.ADPICK_HARVEST_FILE }}
           if-no-files-found: warn
           retention-days: 30

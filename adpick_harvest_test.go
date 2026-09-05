@@ -7,10 +7,110 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestAdpickDirectoryProfileCollectsBothVerticalsWithoutSearching(t *testing.T) {
+	t.Setenv("ADPICK_QUERY_PROFILE", "directory")
+	t.Setenv("ADPICK_SEARCH_QUERIES_JSON", "")
+	queries, err := adpickQueriesFromEnv()
+	if err != nil || len(queries) != 0 {
+		t.Fatalf("directory profile: %v %v", queries, err)
+	}
+	requests := 0
+	client := adpickFixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if !strings.HasSuffix(r.URL.Path, "/malls") {
+			t.Error("directory profile sent a search request")
+		}
+		fmt.Fprint(w, `{"success":true,"data":[{"cp_code":"T","name":"트립닷컴","commissionlink":"https://bitl.bz/travel"},{"cp_code":"K","name":"크몽","commissionlink":"https://bitl.bz/service"},{"cp_code":"B","name":"교보문고"}]}`)
+	})
+	client.coverage = newAdpickCoverage(0)
+	records, err := collectAdpickCatalog(context.Background(), client, queries, 20, adpickTestRun, NowKST())
+	if err != nil || requests != 1 || len(records) != 2 || !client.coverage.DiscoveryComplete || !client.coverage.CollectionComplete || client.coverage.QueriesCompleted != 0 {
+		t.Fatalf("directory requests=%d records=%d coverage=%+v err=%v", requests, len(records), client.coverage, err)
+	}
+	for _, row := range records {
+		if row.RecordType != "merchant" || row.CategorySlug != "" || row.PriceKRW != nil {
+			t.Fatal("directory row fabricated a product")
+		}
+	}
+	t.Setenv("ADPICK_SEARCH_QUERIES_JSON", `[{"vertical":"travel","category":"stays","keyword":"hotel"}]`)
+	if _, err := adpickQueriesFromEnv(); err == nil {
+		t.Fatal("directory silently accepted search overrides")
+	}
+}
+
+func TestAdpickHarvestCheckpointRetainsRecordsBeforePublicationAndRefusesSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "harvest.json")
+	t.Setenv("ADPICK_HARVEST_FILE", path)
+	report := newAdpickCoverage(2)
+	report.RunUUID = adpickTestRun
+	report.QueriesCompleted = 1
+	rows := []adpickCatalogRecord{{RecordType: "merchant", Title: "Public merchant", AffiliateURL: "https://bitl.bz/merchant"}}
+	if err := writeAdpickHarvest(rows, report, "private-api-key"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Schema    string                `json:"schema"`
+		Completed int                   `json:"queries_completed"`
+		Hash      string                `json:"records_sha256"`
+		Records   []adpickCatalogRecord `json:"records"`
+	}
+	if json.Unmarshal(before, &saved) != nil || saved.Schema != "adpick.harvest.v1" || saved.Completed != 1 || len(saved.Records) != 1 || saved.Records[0].AffiliateURL != rows[0].AffiliateURL {
+		t.Fatal("validated records were not checkpointed")
+	}
+	recordsJSON, _ := json.Marshal(rows)
+	if saved.Hash != fmt.Sprintf("%x", sha256.Sum256(recordsJSON)) {
+		t.Fatal("checkpoint digest mismatched")
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("checkpoint is not private")
+	}
+	rows[0].Title = "private-api-key"
+	if err := writeAdpickHarvest(rows, report, "private-api-key"); err == nil {
+		t.Fatal("credential reached checkpoint")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatal("failed checkpoint replaced previous valid harvest")
+	}
+}
+
+func TestAdpickPublicationGateOnlyRechecksPressureAndKeepsBoundedWait(t *testing.T) {
+	calls := 0
+	waits := []time.Duration{}
+	err := waitAdpickPublicationGate(context.Background(), func(context.Context) ([]byte, error) {
+		calls++
+		if calls < 3 {
+			return []byte("::error::ClickHouse write pressure gate deferred this run: iowait_normalized=0.560\n"), errors.New("gate")
+		}
+		return []byte("ClickHouse write pressure gate ok local_targets=4\n"), nil
+	}, func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil })
+	if err != nil || calls != 3 || len(waits) != 2 || waits[0] != 30*time.Second || waits[1] != 60*time.Second {
+		t.Fatalf("calls=%d waits=%v err=%v", calls, waits, err)
+	}
+	calls = 0
+	err = waitAdpickPublicationGate(context.Background(), func(context.Context) ([]byte, error) {
+		calls++
+		return []byte("::error::ClickHouse write pressure gate failed closed: secret https://private.invalid\n"), errors.New("configuration")
+	}, func(context.Context, time.Duration) error { t.Fatal("configuration failure retried"); return nil })
+	if err == nil || calls != 1 || strings.Contains(err.Error(), "secret") {
+		t.Fatal("unsafe gate failure")
+	}
+	if adpickGateDiagnosticPattern.MatchString("::error::ClickHouse write pressure gate deferred this run: https://secret.invalid") {
+		t.Fatal("gate diagnostic accepted URL")
+	}
+}
 
 func TestAdpickCompletedSearchSurvivesLaterFailureAndRejectsHalfQuery(t *testing.T) {
 	client := adpickFixtureClient(t, func(w http.ResponseWriter, r *http.Request) {

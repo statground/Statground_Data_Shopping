@@ -229,7 +229,7 @@ func TestAdpickWorkflowGateAndDedicatedCollectionMode(t *testing.T) {
 		t.Fatal("missing Adpick job")
 	}
 	job := text[start:]
-	for _, required := range []string{"vars.ADPICK_CATALOG_ENABLED != 'false'", "secrets.ADPICK_API", `ADPICK_COLLECT_ONLY: 'true'`, "vars.ADPICK_QUERY_PROFILE || 'diagnostic'", "adpick_coverage_summary.py", "actions/upload-artifact@v4", "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
+	for _, required := range []string{"vars.ADPICK_CATALOG_ENABLED != 'false'", "secrets.ADPICK_API", `ADPICK_COLLECT_ONLY: 'true'`, "vars.ADPICK_QUERY_PROFILE || 'directory'", "adpick_coverage_summary.py", "actions/upload-artifact@v4", "local:" + adpickRawTable, "local:" + adpickSnapshotTable, "local:" + adpickPublishedTable, "Collect verify and publish travel and services catalogs"} {
 		if !strings.Contains(job, required) {
 			t.Errorf("missing workflow contract %s", required)
 		}

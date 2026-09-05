@@ -87,6 +87,9 @@ func (p *ClickHouseRawPublisher) adpickGuardedRead(query string) (string, error)
 }
 
 func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
+	if envString("ADPICK_REPLAY_HARVEST_FILE", "") != "" {
+		return RunAdpickReplayFromEnv(parent)
+	}
 	// Reserve publication time even when a bounded search harvest times out.
 	ctx, cancel := context.WithTimeout(parent, 35*time.Minute)
 	defer cancel()
@@ -146,6 +149,9 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 			return err
 		}
 		report.RetainedOffers, report.EvictedOffers = retained, evicted
+		if err := writeAdpickHarvest(merged, report, client.key); err != nil {
+			return err
+		}
 		return publishAdpickCatalog(publishCtx, pub, merged)
 	})
 }
@@ -173,16 +179,13 @@ func adpickPublicationGateEnv(pub *ClickHouseRawPublisher) []string {
 }
 
 func runAdpickPublicationGate(ctx context.Context, pub *ClickHouseRawPublisher) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "python3", "scripts/clickhouse_pressure_gate.py")
-	command.Env = adpickPublicationGateEnv(pub)
-	// Gate output is diagnostic-only; do not pass connection errors or secrets
-	// through subprocess stderr. A nonzero exit always blocks all catalog writes.
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("Adpick publication storage pressure gate rejected")
-	}
-	return nil
+	return waitAdpickPublicationGate(ctx, func(ctx context.Context) ([]byte, error) {
+		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		command := exec.CommandContext(attempt, "python3", "scripts/clickhouse_pressure_gate.py")
+		command.Env = adpickPublicationGateEnv(pub)
+		return command.CombinedOutput()
+	}, adpickSleep)
 }
 
 func preflightAdpickCatalog(ctx context.Context, pub *ClickHouseRawPublisher) error {

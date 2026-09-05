@@ -7,11 +7,91 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+var adpickGateDiagnosticPattern = regexp.MustCompile(`^(?:ClickHouse write pressure gate ok [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate deferred this run: [A-Za-z0-9_ =.,/-]+|::error::ClickHouse write pressure gate failed closed: ClickHouse pressure query (?:failed status=[0-9]+|transport failed category=[A-Za-z]+))$`)
+
+func waitAdpickPublicationGate(ctx context.Context, run func(context.Context) ([]byte, error), sleep func(context.Context, time.Duration) error) error {
+	for attempt := 0; attempt < 4; attempt++ {
+		output, err := run(ctx)
+		deferred := false
+		for _, line := range strings.Split(string(output), "\n") {
+			if len(line) <= 1500 && adpickGateDiagnosticPattern.MatchString(line) {
+				fmt.Printf("[adpick] publication gate attempt=%d %s\n", attempt+1, line)
+				deferred = deferred || strings.Contains(line, "deferred this run:")
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		if !deferred || attempt == 3 {
+			return fmt.Errorf("Adpick publication storage pressure gate rejected")
+		}
+		// Read-only pressure rechecks only; configuration/auth/transport failures
+		// stop immediately and no database write occurs until a fresh pass.
+		if err := sleep(ctx, time.Duration(attempt+1)*30*time.Second); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("Adpick publication storage pressure gate rejected")
+}
+
+func writeAdpickHarvest(records []adpickCatalogRecord, report *adpickCoverage, key string) error {
+	path := envString("ADPICK_HARVEST_FILE", "")
+	if path == "" {
+		return nil
+	}
+	recordsJSON, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("Adpick harvest encoding failed")
+	}
+	if key != "" && bytes.Contains(recordsJSON, []byte(key)) {
+		return fmt.Errorf("Adpick harvest contains credential material")
+	}
+	value := struct {
+		Schema        string                `json:"schema"`
+		RunUUID       string                `json:"run_uuid"`
+		Completed     int                   `json:"queries_completed"`
+		RecordsSHA256 string                `json:"records_sha256"`
+		Records       []adpickCatalogRecord `json:"records"`
+	}{"adpick.harvest.v1", report.RunUUID, report.QueriesCompleted, fmt.Sprintf("%x", sha256.Sum256(recordsJSON)), records}
+	body, err := json.Marshal(value)
+	if err != nil || len(body) > adpickCatalogLimit {
+		return fmt.Errorf("Adpick harvest exceeds bound")
+	}
+	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
+		return fmt.Errorf("Adpick harvest directory unavailable")
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".adpick-harvest-*")
+	if err != nil {
+		return fmt.Errorf("Adpick harvest file unavailable")
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	_, err = f.Write(body)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || os.Rename(name, path) != nil {
+		return fmt.Errorf("Adpick harvest durable checkpoint failed")
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("Adpick harvest directory unavailable")
+	}
+	defer directory.Close()
+	if directory.Sync() != nil {
+		return fmt.Errorf("Adpick harvest directory sync failed")
+	}
+	return nil
+}
 
 func finishAdpickHarvest(parent context.Context, report *adpickCoverage, records []adpickCatalogRecord, searchErr error, publish func(context.Context, []adpickCatalogRecord) error) error {
 	if !report.DiscoveryComplete {
