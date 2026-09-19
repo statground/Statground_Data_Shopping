@@ -15,11 +15,13 @@ import (
 )
 
 type adpickReplayHarvest struct {
-	Schema        string                `json:"schema"`
-	RunUUID       string                `json:"run_uuid"`
-	Completed     int                   `json:"queries_completed"`
-	RecordsSHA256 string                `json:"records_sha256"`
-	Records       []adpickCatalogRecord `json:"records"`
+	Schema             string                `json:"schema"`
+	RunUUID            string                `json:"run_uuid"`
+	Planned            int                   `json:"queries_planned"`
+	Completed          int                   `json:"queries_completed"`
+	CollectionComplete bool                  `json:"collection_complete"`
+	RecordsSHA256      string                `json:"records_sha256"`
+	Records            []adpickCatalogRecord `json:"records"`
 }
 
 // No API credential is needed: the source is a verified, bounded workflow
@@ -49,7 +51,10 @@ func loadAdpickReplayHarvest(path string, now time.Time) (*adpickReplayHarvest, 
 		return nil, fmt.Errorf("Adpick replay harvest schema rejected")
 	}
 	encoded, err := json.Marshal(harvest.Records)
-	if err != nil || harvest.Schema != "adpick.harvest.v1" || !rawOutboxUUIDPattern.MatchString(harvest.RunUUID) || harvest.Completed < 0 || harvest.Completed > adpickMaximumQueries || len(harvest.Records) < 1 || len(harvest.Records) > 4808 || harvest.RecordsSHA256 != fmt.Sprintf("%x", sha256.Sum256(encoded)) {
+	if err != nil || harvest.Schema != "adpick.harvest.v2" || !rawOutboxUUIDPattern.MatchString(harvest.RunUUID) ||
+		harvest.Planned < 0 || harvest.Planned > adpickMaximumQueries || harvest.Completed != harvest.Planned ||
+		!harvest.CollectionComplete || len(harvest.Records) < 1 || len(harvest.Records) > 4808 ||
+		harvest.RecordsSHA256 != fmt.Sprintf("%x", sha256.Sum256(encoded)) {
 		return nil, fmt.Errorf("Adpick replay harvest integrity rejected")
 	}
 	if err := validateAdpickReplayRecords(harvest.Records, harvest.RunUUID, now); err != nil {
@@ -177,7 +182,9 @@ type adpickReplayOperations struct {
 }
 
 func replayAdpickHarvest(ctx context.Context, harvest *adpickReplayHarvest, runUUID string, now time.Time, ops adpickReplayOperations) error {
-	if harvest == nil || !rawOutboxUUIDPattern.MatchString(runUUID) || validateAdpickReplayRecords(harvest.Records, harvest.RunUUID, now) != nil {
+	if harvest == nil || harvest.Schema != "adpick.harvest.v2" || !harvest.CollectionComplete ||
+		harvest.Completed != harvest.Planned || harvest.Planned < 0 || harvest.Planned > adpickMaximumQueries ||
+		!rawOutboxUUIDPattern.MatchString(runUUID) || validateAdpickReplayRecords(harvest.Records, harvest.RunUUID, now) != nil {
 		return fmt.Errorf("Adpick replay validated harvest required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -192,7 +199,7 @@ func replayAdpickHarvest(ctx context.Context, harvest *adpickReplayHarvest, runU
 	for i := range fresh {
 		fresh[i].CollectRunUUID, fresh[i].Version = runUUID, version
 	}
-	report := newAdpickCoverage(harvest.Completed)
+	report := newAdpickCoverage(harvest.Planned)
 	report.RunUUID, report.QueriesCompleted, report.DiscoveryComplete = runUUID, harvest.Completed, true
 	// A replay proves publication only. It cannot turn an incomplete collection
 	// into a complete one or change the original failed workflow's outcome.

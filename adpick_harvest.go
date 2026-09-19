@@ -55,12 +55,18 @@ func writeAdpickHarvest(records []adpickCatalogRecord, report *adpickCoverage, k
 		return fmt.Errorf("Adpick harvest contains credential material")
 	}
 	value := struct {
-		Schema        string                `json:"schema"`
-		RunUUID       string                `json:"run_uuid"`
-		Completed     int                   `json:"queries_completed"`
-		RecordsSHA256 string                `json:"records_sha256"`
-		Records       []adpickCatalogRecord `json:"records"`
-	}{"adpick.harvest.v1", report.RunUUID, report.QueriesCompleted, fmt.Sprintf("%x", sha256.Sum256(recordsJSON)), records}
+		Schema             string                `json:"schema"`
+		RunUUID            string                `json:"run_uuid"`
+		Planned            int                   `json:"queries_planned"`
+		Completed          int                   `json:"queries_completed"`
+		CollectionComplete bool                  `json:"collection_complete"`
+		RecordsSHA256      string                `json:"records_sha256"`
+		Records            []adpickCatalogRecord `json:"records"`
+	}{
+		"adpick.harvest.v2", report.RunUUID, report.QueriesPlanned,
+		report.QueriesCompleted, report.CollectionComplete,
+		fmt.Sprintf("%x", sha256.Sum256(recordsJSON)), records,
+	}
 	body, err := json.Marshal(value)
 	if err != nil || len(body) > adpickCatalogLimit {
 		return fmt.Errorf("Adpick harvest exceeds bound")
@@ -103,6 +109,12 @@ func finishAdpickHarvest(parent context.Context, report *adpickCoverage, records
 	if len(records) == 0 {
 		return fmt.Errorf("Adpick returned no eligible merchants; existing catalogs retained")
 	}
+	if searchErr != nil {
+		return fmt.Errorf("Adpick search incomplete; existing catalogs retained: %w", searchErr)
+	}
+	if !report.CollectionComplete || report.QueriesCompleted != report.QueriesPlanned {
+		return fmt.Errorf("Adpick search coverage incomplete; existing catalogs retained")
+	}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -112,9 +124,6 @@ func finishAdpickHarvest(parent context.Context, report *adpickCoverage, records
 		return err
 	}
 	report.PublicationComplete = true
-	if searchErr != nil {
-		return fmt.Errorf("Adpick verified harvest published with incomplete search: %w", searchErr)
-	}
 	return nil
 }
 

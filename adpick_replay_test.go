@@ -23,7 +23,11 @@ func replayTestHarvest() (*adpickReplayHarvest, time.Time) {
 	offer.RecordType, offer.CategorySlug, offer.Title, offer.AffiliateURL = "offer", "stays", "Observed hotel", "https://bitl.bz/hotel"
 	offer.ItemKey = fmt.Sprintf("%x", sha256.Sum256([]byte("TRIP\x1f"+offer.AffiliateURL)))
 	offer.SearchKeyword, offer.PriceText, offer.PriceKRW = "제주 호텔", "19,900원", adpickPrice("19,900원")
-	return &adpickReplayHarvest{Schema: "adpick.harvest.v1", RunUUID: adpickTestRun, Completed: 1, Records: []adpickCatalogRecord{merchant, offer}}, now
+	return &adpickReplayHarvest{
+		Schema: "adpick.harvest.v2", RunUUID: adpickTestRun, Planned: 1,
+		Completed: 1, CollectionComplete: true,
+		Records: []adpickCatalogRecord{merchant, offer},
+	}, now
 }
 
 func writeReplayTestFile(t *testing.T, harvest *adpickReplayHarvest) string {
@@ -54,8 +58,8 @@ func TestAdpickReplayLoadsCheckpointWithoutAPIKeyAndKeepsObservations(t *testing
 	// The producer's real atomic writer and replay decoder share one format.
 	path := filepath.Join(t.TempDir(), "producer.json")
 	t.Setenv("ADPICK_HARVEST_FILE", path)
-	report := newAdpickCoverage(2)
-	report.RunUUID, report.QueriesCompleted = harvest.RunUUID, harvest.Completed
+	report := newAdpickCoverage(harvest.Planned)
+	report.RunUUID, report.QueriesCompleted, report.CollectionComplete = harvest.RunUUID, harvest.Completed, true
 	if err := writeAdpickHarvest(harvest.Records, report, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +82,7 @@ func TestAdpickReplayRejectsAmbiguousCorruptAndUnsafeEnvelopes(t *testing.T) {
 			case "checksum":
 				body = []byte(strings.Replace(string(body), "Observed hotel", "Altered hotel", 1))
 			case "schema":
-				body = []byte(strings.Replace(string(body), "adpick.harvest.v1", "adpick.harvest.v2", 1))
+				body = []byte(strings.Replace(string(body), "adpick.harvest.v2", "adpick.harvest.v1", 1))
 			case "unknown field":
 				body = append([]byte(`{"unapproved":true,`), body[1:]...)
 			case "duplicate key":
@@ -111,7 +115,7 @@ func TestAdpickReplayRejectsAmbiguousCorruptAndUnsafeEnvelopes(t *testing.T) {
 }
 
 func TestAdpickReplayValidDigestDoesNotAuthorizeInvalidRecords(t *testing.T) {
-	for _, name := range []string{"excluded mall", "wrong CP", "wrong merchant key", "wrong category", "wrong item hash", "duplicate item", "missing merchant", "unsafe affiliate", "unsafe image", "price mismatch", "future observation", "mixed run", "mixed generation", "invalid time", "credential", "query count"} {
+	for _, name := range []string{"excluded mall", "wrong CP", "wrong merchant key", "wrong category", "wrong item hash", "duplicate item", "missing merchant", "unsafe affiliate", "unsafe image", "price mismatch", "future observation", "mixed run", "mixed generation", "invalid time", "credential", "query count", "incomplete coverage"} {
 		t.Run(name, func(t *testing.T) {
 			harvest, now := replayTestHarvest()
 			switch name {
@@ -148,6 +152,8 @@ func TestAdpickReplayValidDigestDoesNotAuthorizeInvalidRecords(t *testing.T) {
 				harvest.Records[1].Title = "fixture-private-value"
 			case "query count":
 				harvest.Completed = 241
+			case "incomplete coverage":
+				harvest.CollectionComplete = false
 			}
 			if _, err := loadAdpickReplayHarvest(writeReplayTestFile(t, harvest), now); err == nil || strings.Contains(err.Error(), "fixture-private-value") {
 				t.Fatalf("invalid records accepted or unsafe error: %v", err)

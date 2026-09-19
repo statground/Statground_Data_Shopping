@@ -61,12 +61,14 @@ func TestAdpickHarvestCheckpointRetainsRecordsBeforePublicationAndRefusesSecret(
 		t.Fatal(err)
 	}
 	var saved struct {
-		Schema    string                `json:"schema"`
-		Completed int                   `json:"queries_completed"`
-		Hash      string                `json:"records_sha256"`
-		Records   []adpickCatalogRecord `json:"records"`
+		Schema             string                `json:"schema"`
+		Planned            int                   `json:"queries_planned"`
+		Completed          int                   `json:"queries_completed"`
+		CollectionComplete bool                  `json:"collection_complete"`
+		Hash               string                `json:"records_sha256"`
+		Records            []adpickCatalogRecord `json:"records"`
 	}
-	if json.Unmarshal(before, &saved) != nil || saved.Schema != "adpick.harvest.v1" || saved.Completed != 1 || len(saved.Records) != 1 || saved.Records[0].AffiliateURL != rows[0].AffiliateURL {
+	if json.Unmarshal(before, &saved) != nil || saved.Schema != "adpick.harvest.v2" || saved.Planned != 2 || saved.Completed != 1 || saved.CollectionComplete || len(saved.Records) != 1 || saved.Records[0].AffiliateURL != rows[0].AffiliateURL {
 		t.Fatal("validated records were not checkpointed")
 	}
 	recordsJSON, _ := json.Marshal(rows)
@@ -133,7 +135,7 @@ func TestAdpickCompletedSearchSurvivesLaterFailureAndRejectsHalfQuery(t *testing
 	}
 }
 
-func TestAdpickSearchDeadlineHasIndependentPublicationBudget(t *testing.T) {
+func TestAdpickIncompleteSearchNeverPublishesAndCompleteSearchGetsIndependentBudget(t *testing.T) {
 	collect, cancel := context.WithCancel(context.Background())
 	cancel()
 	report := newAdpickCoverage(2)
@@ -141,14 +143,24 @@ func TestAdpickSearchDeadlineHasIndependentPublicationBudget(t *testing.T) {
 	called := false
 	err := finishAdpickHarvest(context.Background(), report, []adpickCatalogRecord{{RecordType: "merchant"}}, collect.Err(), func(ctx context.Context, rows []adpickCatalogRecord) error {
 		called = true
+		return nil
+	})
+	if called || report.PublicationComplete || report.CollectionComplete || !errors.Is(err, context.Canceled) {
+		t.Fatalf("partial search published: %+v %v", report, err)
+	}
+
+	report.CollectionComplete = true
+	report.QueriesCompleted = report.QueriesPlanned
+	err = finishAdpickHarvest(context.Background(), report, []adpickCatalogRecord{{RecordType: "merchant"}}, nil, func(ctx context.Context, rows []adpickCatalogRecord) error {
+		called = true
 		deadline, ok := ctx.Deadline()
 		if ctx.Err() != nil || !ok || time.Until(deadline) > 10*time.Minute || time.Until(deadline) < 9*time.Minute {
-			t.Fatal("search cancellation consumed publication budget")
+			t.Fatal("complete search did not receive an independent publication budget")
 		}
 		return nil
 	})
-	if !called || !report.PublicationComplete || report.CollectionComplete || !errors.Is(err, context.Canceled) {
-		t.Fatalf("partial state hidden: %+v %v", report, err)
+	if err != nil || !called || !report.PublicationComplete {
+		t.Fatalf("complete search was not published: %+v %v", report, err)
 	}
 	called = false
 	if err := finishAdpickHarvest(collect, report, []adpickCatalogRecord{{}}, nil, func(context.Context, []adpickCatalogRecord) error { called = true; return nil }); err == nil || called {
