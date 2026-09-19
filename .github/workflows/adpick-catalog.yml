@@ -33,10 +33,10 @@ jobs:
     env:
       INGEST_MODE: clickhouse
       ADPICK_COLLECT_ONLY: 'true'
-      # Actual diagnostic searches returned no eligible travel/services offers.
-      # Refresh the verified directory with one malls request and zero searches.
-      # Focused/expanded search remains opt-in through repository variables.
-      ADPICK_QUERY_PROFILE: ${{ vars.ADPICK_QUERY_PROFILE || 'directory' }}
+      # Scheduled refreshes must exercise bounded provider search. Directory-only
+      # collection proves merchant membership, but it is not offer coverage.
+      # Manual runs may still select a wider profile through the repository variable.
+      ADPICK_QUERY_PROFILE: ${{ github.event_name == 'schedule' && 'standard' || (vars.ADPICK_QUERY_PROFILE || 'standard') }}
       ADPICK_SEARCH_LIMIT: '20'
       ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
