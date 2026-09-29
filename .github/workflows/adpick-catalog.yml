@@ -7,11 +7,11 @@ on:
         description: Prior Adpick run to replay before collecting (blank selects recent failed run)
         type: string
         required: false
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/adpick-catalog.yml'
-      - 'adpick*.go'
+      confirm_collection:
+        description: I am starting a fresh Adpick API collection
+        type: boolean
+        default: false
+        required: true
   schedule:
     - cron: '25 2 * * *'
 
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   adpick_catalog:
-    if: ${{ github.event_name != 'schedule' || vars.ADPICK_CATALOG_ENABLED != 'false' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '25 2 * * *' && vars.ADPICK_CATALOG_ENABLED != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -38,7 +38,7 @@ jobs:
       # Manual runs may still select a wider profile through the repository variable.
       ADPICK_QUERY_PROFILE: ${{ github.event_name == 'schedule' && 'standard' || (vars.ADPICK_QUERY_PROFILE || 'standard') }}
       ADPICK_SEARCH_LIMIT: '20'
-      ADPICK_SEARCH_QUERIES_JSON: ${{ vars.ADPICK_SEARCH_QUERIES_JSON || '' }}
+      ADPICK_SEARCH_QUERIES_JSON: ${{ github.event_name == 'schedule' && '' || (github.event_name == 'workflow_dispatch' && vars.ADPICK_SEARCH_QUERIES_JSON || '') }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
       ADPICK_HARVEST_FILE: /tmp/adpick-harvest.json
       CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
@@ -180,7 +180,7 @@ jobs:
         run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Collect verify and publish travel and services catalogs
-        if: ${{ steps.replay.outputs.published != 'true' }}
+        if: ${{ steps.replay.outputs.published != 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_collection == 'true')) }}
         env:
           ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
         run: go run .

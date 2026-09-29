@@ -90,6 +90,10 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 	if envString("ADPICK_REPLAY_HARVEST_FILE", "") != "" {
 		return RunAdpickReplayFromEnv(parent)
 	}
+	plan, err := adpickCollectionPlanFromEnv()
+	if err != nil {
+		return err
+	}
 	// Reserve publication time even when a bounded search harvest times out.
 	ctx, cancel := context.WithTimeout(parent, 35*time.Minute)
 	defer cancel()
@@ -100,11 +104,8 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	queries, err := adpickQueriesFromEnv()
-	if err != nil {
-		return err
-	}
-	client.directoryOnly = envString("ADPICK_QUERY_PROFILE", "standard") == "directory"
+	queries := plan.queries
+	client.directoryOnly = plan.directoryOnly
 	report := newAdpickCoverage(len(queries))
 	client.coverage = report
 	client.progress = func() error { return writeAdpickCoverage(report, client) }
@@ -116,10 +117,7 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 			resultErr = err
 		}
 	}()
-	limit := boundedRawInt(envString("ADPICK_SEARCH_LIMIT", "20"), 0, 1, 20)
-	if limit == 0 {
-		return fmt.Errorf("ADPICK_SEARCH_LIMIT must be between 1 and 20")
-	}
+	limit := plan.searchLimit
 	pub, err := NewClickHouseRawPublisherFromEnv()
 	if err != nil {
 		return err
