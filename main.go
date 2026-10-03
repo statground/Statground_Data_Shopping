@@ -3299,7 +3299,6 @@ func FinalizeCollection(start time.Time, resultRows []Row, listRows []Row, detai
 // ============================================================
 
 func RunGmarketCollection(rootCtx context.Context) {
-	_ = rootCtx
 	start := time.Now()
 
 	fmt.Println("Gmarket Go 크롤러 시작")
@@ -3330,7 +3329,11 @@ func RunGmarketCollection(rootCtx context.Context) {
 		defer cancel()
 	}
 
-	listRowsAll := CollectListProducts(ctx)
+	listCtx := rootCtx
+	if ctx != nil {
+		listCtx = ctx
+	}
+	listRowsAll := CollectListProducts(listCtx)
 	listRows := ApplyShardFilter(listRowsAll)
 
 	fmt.Println("\n====================================")

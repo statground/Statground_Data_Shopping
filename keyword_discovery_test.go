@@ -1,11 +1,78 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/statground/Statground_Data_Shopping/internal/lexicon"
 )
+
+func TestBrowserlessGmarketUsesRootContextForDictionaryAdmission(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		name := "active"
+		if canceled {
+			name = "canceled"
+		}
+		t.Run(name, func(t *testing.T) {
+			previousEnabled, previousMode, previousSource, previousCount := GmarketCollectEnabled, CollectMode, ListSourceMode, RandomKeywordCount
+			previousEmpty, previousDetails, previousExcel, previousIngest := AllowEmptyResult, CollectDetailsEnabled, SaveExcelEnabled, IngestMode
+			t.Cleanup(func() {
+				GmarketCollectEnabled, CollectMode, ListSourceMode, RandomKeywordCount = previousEnabled, previousMode, previousSource, previousCount
+				AllowEmptyResult, CollectDetailsEnabled, SaveExcelEnabled, IngestMode = previousEmpty, previousDetails, previousExcel, previousIngest
+			})
+			GmarketCollectEnabled, CollectMode, ListSourceMode, RandomKeywordCount = true, "search_keywords", "gsearch_ajax", 2
+			AllowEmptyResult, CollectDetailsEnabled, SaveExcelEnabled, IngestMode = true, false, false, "none"
+			var mu sync.Mutex
+			queries := []string{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				sql := string(body)
+				mu.Lock()
+				queries = append(queries, sql)
+				mu.Unlock()
+				if strings.HasPrefix(sql, "SELECT keyword,normalized_word,language,sources,snapshot_id,scope,argMax(confidence") {
+					json.NewEncoder(w).Encode(map[string]any{"data": []lexicon.Candidate{{Keyword: "사과", NormalizedWord: "사과", Language: "ko", Sources: []string{"shopping_gmarket"}, Confidence: .9, SnapshotID: strings.Repeat("a", 64), Scope: "gmarket"}}})
+					return
+				}
+				// Refuse the selection health gate before any merchant or DB write.
+				io.WriteString(w, `{"data":[]}`)
+			}))
+			defer server.Close()
+			t.Setenv("LEXICON_CLICKHOUSE_HTTP_URL", server.URL)
+			t.Setenv("LEXICON_CLICKHOUSE_USER", "fixture")
+			t.Setenv("LEXICON_CLICKHOUSE_PASSWORD", "fixture-password")
+			t.Setenv("LEXICON_CANDIDATES_FILE", "")
+			t.Setenv("LEXICON_STATE_DIR", t.TempDir())
+			t.Setenv("LEXICON_RUN_ID", "fixture-gmarket-browserless")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if canceled {
+				cancel()
+			}
+			RunGmarketCollection(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			if canceled {
+				if len(queries) != 0 {
+					t.Fatal("browserless collection detached from canceled root context")
+				}
+			} else if len(queries) != 3 || !strings.Contains(queries[2], "system.replicas") {
+				t.Fatalf("browserless dictionary admission performed %d read queries", len(queries))
+			}
+			for _, sql := range queries {
+				if !strings.HasPrefix(sql, "SELECT ") {
+					t.Fatal("unverified dictionary admission wrote to the database")
+				}
+			}
+		})
+	}
+}
 
 func TestShoppingKeywordBudgetCannotExpandOrBecomeUnlimited(t *testing.T) {
 	for _, test := range []struct {
