@@ -206,6 +206,9 @@ jobs:
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.random_category_count || '0' }}
       GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.products_per_category || '60' }}
       GMARKET_RANDOM_KEYWORD_COUNT: ${{ github.event.inputs.random_keyword_count || '5' }}
+      LEXICON_RUN_ID: ${{ github.run_id }}
+      LEXICON_STATE_DIR: /tmp/shopping-lexicon-state
+      SHOPPING_ANALYSIS_REFRESH_AFTER_COLLECTION: "false"
       GMARKET_DETAIL_SOURCE_MODE: ${{ github.event.inputs.detail_source_mode || 'korean' }}
       GMARKET_DETAIL_LIMIT: ${{ github.event.inputs.detail_limit || '0' }}
       GMARKET_OUTPUT_FILE: ${{ github.event.inputs.output_file || 'outputs/gmarket_go_validated_parallel_detail.xlsx' }}
@@ -307,6 +310,7 @@ jobs:
           CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
             local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,
             local:Data_Shopping_Raw.kurly_product_raw_endpoint_history,
+            replica:Data_Content_Lexicon.keyword_selection_log_local,
             local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
@@ -357,6 +361,12 @@ jobs:
           url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
           gmarket_query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
           kurly_query="SELECT count() FROM Data_Shopping_Raw.kurly_product_raw WHERE collect_run_uuid = toUUID('${KURLY_RUN_UUID}') FORMAT TabSeparatedRaw"
+          outbox_query="SELECT count() FROM Data_Shopping_Log.shopping_raw_direct_insert_outbox WHERE replayed_at IS NULL AND replaceAll(target_table, char(96), '') IN ('Data_Shopping_Raw.gmarket_product_raw_endpoint_history', 'Data_Shopping_Raw.kurly_product_raw_endpoint_history') SETTINGS max_threads=1, max_execution_time=10 FORMAT TabSeparatedRaw"
+          pending="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$outbox_query")"
+          if [ "$pending" != "0" ]; then
+            echo "Raw outbox is not confirmed drained; manual replay required before publication"
+            exit 1
+          fi
           for attempt in $(seq 1 24); do
             gmarket_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$gmarket_query" || true)"
             kurly_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$kurly_query" || true)"
@@ -451,6 +461,9 @@ jobs:
       GMARKET_RANDOM_CATEGORY_COUNT: ${{ github.event.inputs.detail_random_category_count || '0' }}
       GMARKET_PRODUCTS_PER_CATEGORY: ${{ github.event.inputs.detail_products_per_category || '60' }}
       GMARKET_RANDOM_KEYWORD_COUNT: ${{ github.event.inputs.detail_random_keyword_count || '5' }}
+      LEXICON_RUN_ID: ${{ github.run_id }}
+      LEXICON_STATE_DIR: /tmp/shopping-lexicon-state
+      SHOPPING_ANALYSIS_REFRESH_AFTER_COLLECTION: "false"
       GMARKET_RANDOM_SEED: ${{ github.run_id }}
       GMARKET_LIST_SOURCE_MODE: "gsearch_ajax"
       GMARKET_LIST_PAGE_CONCURRENCY: "1"
@@ -537,6 +550,7 @@ jobs:
         env:
           CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
             local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,
+            replica:Data_Content_Lexicon.keyword_selection_log_local,
             local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
           CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
@@ -586,6 +600,12 @@ jobs:
           esac
           url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
           query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
+          outbox_query="SELECT count() FROM Data_Shopping_Log.shopping_raw_direct_insert_outbox WHERE replayed_at IS NULL AND replaceAll(target_table, char(96), '') IN ('Data_Shopping_Raw.gmarket_product_raw_endpoint_history', 'Data_Shopping_Raw.kurly_product_raw_endpoint_history') SETTINGS max_threads=1, max_execution_time=10 FORMAT TabSeparatedRaw"
+          pending="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$outbox_query")"
+          if [ "$pending" != "0" ]; then
+            echo "Raw outbox is not confirmed drained; manual replay required before publication"
+            exit 1
+          fi
           for attempt in $(seq 1 24); do
             count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$query" || true)"
             count="$(printf '%s' "$count" | tr -d '[:space:]')"

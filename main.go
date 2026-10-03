@@ -2445,7 +2445,15 @@ func selectedSearchKeywords(limit int) []string {
 func CollectFromSearchKeywords(ctx context.Context, keywordLimit int) []Row {
 	allRows := []Row{}
 
-	keywords := selectedSearchKeywords(keywordLimit)
+	if keywordLimit <= 0 {
+		keywordLimit = RandomKeywordCount
+	}
+	selected, err := selectShoppingKeywords(ctx, "gmarket", SearchKeywords, keywordLimit, true)
+	if err != nil {
+		fmt.Println("[gmarket]", err)
+		return nil
+	}
+	keywords := shoppingSelectionKeywords(selected)
 
 	if ListSourceMode == "gsearch_ajax" {
 		jobs := []ListJob{}
@@ -2463,10 +2471,12 @@ func CollectFromSearchKeywords(ctx context.Context, keywordLimit int) []Row {
 				})
 			}
 		}
-		return CollectListJobsDirect(jobs)
+		rows := CollectListJobsDirect(jobs)
+		finishShoppingKeywords(ctx, selected, rows, "empty_or_unavailable")
+		return rows
 	}
 
-	for _, keyword := range keywords {
+	for keywordIndex, keyword := range keywords {
 		for page := 1; page <= SearchPagesPerKeyword; page++ {
 			searchURL := BuildSearchURL(keyword, page, SearchPageSize)
 
@@ -2500,7 +2510,8 @@ func CollectFromSearchKeywords(ctx context.Context, keywordLimit int) []Row {
 
 			allRows = append(allRows, rows...)
 
-			if TotalTargetProducts > 0 && len(allRows) >= TotalTargetProducts*2 {
+			if keywordIndex%2 == 1 && page == SearchPagesPerKeyword && TotalTargetProducts > 0 && len(allRows) >= TotalTargetProducts*2 {
+				finishShoppingKeywords(ctx, selected[:keywordIndex+1], allRows, "empty_or_unavailable")
 				return allRows
 			}
 
@@ -2508,6 +2519,7 @@ func CollectFromSearchKeywords(ctx context.Context, keywordLimit int) []Row {
 		}
 	}
 
+	finishShoppingKeywords(ctx, selected, allRows, "empty_or_unavailable")
 	return allRows
 }
 
@@ -2646,7 +2658,7 @@ func CollectListProducts(ctx context.Context) []Row {
 		}
 
 	case "search_keywords":
-		rows = CollectFromSearchKeywords(ctx, 0)
+		rows = CollectFromSearchKeywords(ctx, RandomKeywordCount)
 
 	case "from_excel":
 		rows = CollectFromExcel()
@@ -3406,6 +3418,13 @@ func RunGmarketCollection(rootCtx context.Context) {
 func main() {
 	ApplyEnvConfig()
 	ApplyKurlyEnvConfig()
+	if envBool("LEXICON_PLAN_ONLY", false) {
+		if err := runShoppingKeywordPlan(context.Background()); err != nil {
+			fmt.Println("Shopping keyword plan failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if envBool("ADPICK_COLLECT_ONLY", false) {
 		if err := RunAdpickCatalogFromEnv(context.Background()); err != nil {
 			fmt.Println("Adpick travel and services catalog collection failed:", shortIngestError(err))
@@ -3445,21 +3464,12 @@ func main() {
 		rand.Seed(RandomSeed)
 	}
 
+	var gate, preflight func(context.Context) error
 	if ShouldPublishKafka() {
-		fmt.Println("Kafka 사전 점검 시작")
-		if err := PreflightKafkaFromEnv(context.Background()); err != nil {
-			fmt.Println("Kafka 사전 점검 실패:", err)
-			fmt.Println("조치 필요: Docker 권한이 있는 host에서 Statground_SQL/docker-compose/50004_Kafka_Platform/recreate_with_public_host.sh를 실행해 Kafka advertised listener를 현재 public host로 맞춰야 합니다.")
-			os.Exit(1)
-		}
-		fmt.Println("Kafka 사전 점검 완료")
+		preflight = PreflightKafkaFromEnv
 	} else if ShouldWriteClickHouse() {
-		fmt.Println("ClickHouse 직접 적재 사전 점검 시작")
-		if err := PreflightClickHouseDirectFromEnv(context.Background()); err != nil {
-			fmt.Println("ClickHouse 직접 적재 사전 점검 실패:", shortIngestError(err))
-			os.Exit(1)
-		}
-		fmt.Println("ClickHouse 직접 적재 사전 점검 완료")
+		gate = runShoppingCollectionGate
+		preflight = PreflightClickHouseDirectFromEnv
 	}
 
 	type platformRunner struct {
@@ -3486,7 +3496,18 @@ func main() {
 		order = append(order, runner.name)
 	}
 	fmt.Println("쇼핑 플랫폼 실행 순서:", strings.Join(order, " -> "))
-	for _, runner := range runners {
-		runner.run(context.Background())
+	if err := runShoppingCollectorPhase(context.Background(), gate, preflight, func(ctx context.Context) {
+		for _, runner := range runners {
+			runner.run(ctx)
+		}
+	}); err != nil {
+		fmt.Println("Shopping source preflight failed:", shortIngestError(err))
+		os.Exit(1)
+	}
+	if ShouldWriteClickHouse() && envBool("SHOPPING_ANALYSIS_REFRESH_AFTER_COLLECTION", true) {
+		if err := runShoppingInsightAfterCollection(context.Background()); err != nil {
+			fmt.Println("Shopping collection committed; Price Insight publication deferred:", shortIngestError(err))
+			os.Exit(1)
+		}
 	}
 }

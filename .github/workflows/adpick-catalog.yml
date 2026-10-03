@@ -40,6 +40,7 @@ jobs:
       ADPICK_SEARCH_LIMIT: '20'
       ADPICK_SEARCH_QUERIES_JSON: ${{ github.event_name == 'schedule' && '' || (github.event_name == 'workflow_dispatch' && vars.ADPICK_SEARCH_QUERIES_JSON || '') }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
+      ADPICK_PREVIOUS_COVERAGE_REPORT: /tmp/adpick-directory-baseline/adpick-coverage.json
       ADPICK_HARVEST_FILE: /tmp/adpick-harvest.json
       CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: '120'
@@ -151,6 +152,39 @@ jobs:
               }
             }
             if (requested && !found) throw new Error('Replay harvest unavailable for this workflow');
+
+      - name: Find prior mall directory observation
+        id: directory_baseline
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const repository = {owner: context.repo.owner, repo: context.repo.repo};
+            const runs = (await github.rest.actions.listWorkflowRuns({...repository,
+              workflow_id: 'adpick-catalog.yml', status: 'completed', per_page: 5})).data.workflow_runs;
+            for (const run of runs) {
+              if (run.id === context.runId || run.head_branch !== 'main' ||
+                  run.path !== '.github/workflows/adpick-catalog.yml' ||
+                  run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`) continue;
+              const artifacts = (await github.rest.actions.listWorkflowRunArtifacts({
+                ...repository, run_id: run.id, per_page: 20})).data.artifacts;
+              const artifact = artifacts.find(item => !item.expired &&
+                item.name === `adpick-coverage-${run.id}-${run.run_attempt}` &&
+                item.size_in_bytes > 0 && item.size_in_bytes <= 64 * 1024 * 1024);
+              if (artifact) {
+                core.setOutput('run_id', String(run.id));
+                core.setOutput('artifact_name', artifact.name);
+                break;
+              }
+            }
+
+      - name: Download prior mall directory observation
+        if: ${{ steps.directory_baseline.outputs.run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.directory_baseline.outputs.artifact_name }}
+          run-id: ${{ steps.directory_baseline.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/adpick-directory-baseline
 
       - name: Download prior harvest
         if: ${{ steps.prior.outputs.run_id != '' }}

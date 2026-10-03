@@ -159,6 +159,30 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertIn("maxIf(absolute_delay, queue_size > 0)", query)
         self.assertIn("max_threads = 1", query)
 
+    def test_lexicon_ledger_uses_replica_health_not_local_engine_check(self):
+        targets = gate.load_targets({gate.TARGET_ENV: (
+            "local:Data_Shopping_Raw.gmarket_product_raw_endpoint_history,"
+            "local:Data_Shopping_Log.shopping_raw_direct_insert_outbox,"
+            "replica:Data_Content_Lexicon.keyword_selection_log_local"
+        )})
+        self.assertEqual(
+            [target for target in targets if target[0] == "replica"],
+            [("replica", "Data_Content_Lexicon", "keyword_selection_log_local")],
+        )
+        replica_predicate = gate._target_predicate(targets, "replica", "table")
+        local_predicate = gate._target_predicate(targets, "local", "name")
+        self.assertIn("('Data_Content_Lexicon', 'keyword_selection_log_local')", replica_predicate)
+        self.assertNotIn("keyword_selection_log_local", local_predicate)
+        query = gate.build_pressure_query(targets)
+        self.assertIn(f"FROM system.replicas WHERE {replica_predicate}", query)
+        self.assertIn(f"FROM system.tables WHERE is_temporary = 0 AND {local_predicate}", query)
+        snapshot = dict(self.healthy, expected_replica_target_count=1,
+                        replica_target_count=1, expected_local_target_count=2,
+                        local_target_count=2)
+        self.assertEqual(gate.evaluate(snapshot, self.thresholds), [])
+        self.assertIn("replica_targets=0/1", gate.evaluate(
+            dict(snapshot, replica_target_count=0), self.thresholds))
+
     def test_url_supports_both_env_families(self):
         self.assertEqual(
             gate.clickhouse_url({"CH_HOST": "db.example", "CH_PORT": "8123", "CH_SECURE": "true"}),
@@ -208,6 +232,8 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertIn("local:Data_Shopping_Raw.kurly_product_raw_endpoint_history", workflow)
         self.assertIn("local:Data_Shopping_Log.shopping_raw_direct_insert_outbox", workflow)
         self.assertIn("local:Data_Shopping_Service.shopping_price_insight_snapshot", workflow)
+        self.assertEqual(workflow.count("replica:Data_Content_Lexicon.keyword_selection_log_local"), 2)
+        self.assertNotIn("local:Data_Content_Lexicon.keyword_selection_log_local", workflow)
 
 
 if __name__ == "__main__":

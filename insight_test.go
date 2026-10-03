@@ -382,7 +382,7 @@ func TestInsightRefreshBuildsBeforeFirstWriteAndPublishesMarkerLast(t *testing.T
 	if err := runShoppingInsightRefresh(context.Background(), client, tables); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"preflight", "insert_keyword", "insert_snapshot", "verify_refresh", "insert_published", "verify_published"}
+	want := []string{"preflight", "verify_raw", "insert_keyword", "insert_snapshot", "verify_refresh", "verify_raw", "insert_published", "verify_published"}
 	if !sameInsightStringSet(client.calls, want) {
 		t.Fatalf("calls=%v, want members %v", client.calls, want)
 	}
@@ -410,7 +410,7 @@ func TestInsightRefreshRejectsIncompleteCategorySetBeforeWrite(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "standard") {
 		t.Fatalf("error=%v, want standard scope validation failure", err)
 	}
-	if len(client.calls) != 1 || client.calls[0] != "preflight" {
+	if len(client.calls) != 2 || client.calls[0] != "preflight" || client.calls[1] != "verify_raw" {
 		t.Fatalf("writes happened before complete build validation: %v", client.calls)
 	}
 }
@@ -462,6 +462,8 @@ type fakeInsightRefreshClient struct {
 	verificationOverride *insightRefreshVerification
 	versionMismatch      bool
 	preflightErr         error
+	rawErrAt             int
+	rawChecks            int
 }
 
 type insightRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -479,6 +481,15 @@ func (insightTemporaryNetworkError) Temporary() bool { return true }
 func (f *fakeInsightRefreshClient) preflightInsightPublishTargets(context.Context, insightRefreshTables) error {
 	f.calls = append(f.calls, "preflight")
 	return f.preflightErr
+}
+
+func (f *fakeInsightRefreshClient) verifyInsightRawIngestion(context.Context) error {
+	f.calls = append(f.calls, "verify_raw")
+	f.rawChecks++
+	if f.rawErrAt == f.rawChecks {
+		return fmt.Errorf("raw batch pending")
+	}
+	return nil
 }
 
 func (f *fakeInsightRefreshClient) fetchInsightProducts(context.Context) ([]insightProduct, error) {

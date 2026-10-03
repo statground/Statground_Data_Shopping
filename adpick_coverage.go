@@ -28,26 +28,40 @@ type adpickMerchantCoverage struct {
 	Offers   int    `json:"offers"`
 }
 
+// A directory observation is membership evidence only. Unrecognized malls stay
+// outside the catalog and never gain permission for search or affiliate calls.
+type adpickMallObservation struct {
+	Code   string `json:"cp_code"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
 type adpickCoverage struct {
-	RunUUID             string                            `json:"run_uuid"`
-	StartedAt           string                            `json:"started_at"`
-	UpdatedAt           string                            `json:"updated_at"`
-	QueriesPlanned      int                               `json:"queries_planned"`
-	QueriesCompleted    int                               `json:"queries_completed"`
-	Requests            int                               `json:"request_attempts"`
-	Retries             int                               `json:"retries"`
-	CollectionComplete  bool                              `json:"collection_complete"`
-	DiscoveryComplete   bool                              `json:"discovery_complete"`
-	RetainedOffers      int                               `json:"retained_previous_offers"`
-	EvictedOffers       int                               `json:"evicted_oldest_offers"`
-	PublicationComplete bool                              `json:"publication_complete"`
-	TargetMet           bool                              `json:"coverage_target_met"`
-	Failure             string                            `json:"failure,omitempty"`
-	TargetOffers        map[string]int                    `json:"target_offers"`
-	OffersByVertical    map[string]int                    `json:"offers_by_vertical"`
-	OffersByCategory    map[string]int                    `json:"offers_by_category"`
-	Merchants           map[string]adpickMerchantCoverage `json:"merchants"`
-	Queries             []adpickQueryCoverage             `json:"queries"`
+	RunUUID                  string                            `json:"run_uuid"`
+	StartedAt                string                            `json:"started_at"`
+	UpdatedAt                string                            `json:"updated_at"`
+	QueriesPlanned           int                               `json:"queries_planned"`
+	QueriesCompleted         int                               `json:"queries_completed"`
+	Requests                 int                               `json:"request_attempts"`
+	Retries                  int                               `json:"retries"`
+	CollectionComplete       bool                              `json:"collection_complete"`
+	DiscoveryComplete        bool                              `json:"discovery_complete"`
+	RetainedOffers           int                               `json:"retained_previous_offers"`
+	EvictedOffers            int                               `json:"evicted_oldest_offers"`
+	PublicationComplete      bool                              `json:"publication_complete"`
+	TargetMet                bool                              `json:"coverage_target_met"`
+	Failure                  string                            `json:"failure,omitempty"`
+	TargetOffers             map[string]int                    `json:"target_offers"`
+	OffersByVertical         map[string]int                    `json:"offers_by_vertical"`
+	OffersByCategory         map[string]int                    `json:"offers_by_category"`
+	Merchants                map[string]adpickMerchantCoverage `json:"merchants"`
+	Queries                  []adpickQueryCoverage             `json:"queries"`
+	MallDirectory            []adpickMallObservation           `json:"mall_directory"`
+	MallBaselineAvailable    bool                              `json:"mall_baseline_available"`
+	NewMallCodes             []string                          `json:"new_mall_codes"`
+	RemovedMallCodes         []string                          `json:"removed_mall_codes"`
+	MissingEligibleMerchants []string                          `json:"missing_eligible_merchants"`
+	InvalidMallEntries       int                               `json:"invalid_mall_entries"`
 }
 
 func newAdpickCoverage(planned int) *adpickCoverage {

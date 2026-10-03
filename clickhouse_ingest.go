@@ -79,7 +79,7 @@ func (b *BufferedRowPublisher) Flush() error {
 }
 
 func shouldRetryStreamingPublish(err error) bool {
-	return err != nil && !isAmbiguousRawInsertError(err) && !errors.Is(err, errDirectEndpointHostnameMismatch)
+	return err != nil && !isAmbiguousRawInsertError(err) && !errors.Is(err, errDirectEndpointHostnameMismatch) && !errors.Is(err, errRawDeliveryQueued)
 }
 
 func (b *BufferedRowPublisher) PendingRows() []Row {

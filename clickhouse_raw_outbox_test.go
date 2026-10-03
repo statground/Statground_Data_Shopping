@@ -143,6 +143,10 @@ func TestDirectEndpointIdentityPrecedesTargetAndIsCached(t *testing.T) {
 			writer.WriteHeader(http.StatusOK)
 			return
 		}
+		if strings.Contains(body, "uniqExact(event_uuid) AS unique_events") {
+			_, _ = writer.Write([]byte("{\"matched\":1,\"unique_events\":1}\n"))
+			return
+		}
 		t.Errorf("unexpected request: %s", body)
 		writer.WriteHeader(http.StatusBadRequest)
 	}))
@@ -164,9 +168,11 @@ func TestDirectEndpointIdentityPrecedesTargetAndIsCached(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(requests) != 3 || requests[0] != "SELECT hostName() FORMAT TabSeparatedRaw" ||
+	if len(requests) != 5 || requests[0] != "SELECT hostName() FORMAT TabSeparatedRaw" ||
 		!strings.HasPrefix(requests[1], "INSERT INTO "+defaultGmarketRawInsertTable+" ") ||
-		!strings.HasPrefix(requests[2], "INSERT INTO "+defaultGmarketRawInsertTable+" ") {
+		!strings.Contains(requests[2], "uniqExact(event_uuid)") ||
+		!strings.HasPrefix(requests[3], "INSERT INTO "+defaultGmarketRawInsertTable+" ") ||
+		!strings.Contains(requests[4], "uniqExact(event_uuid)") {
 		t.Fatalf("request order=%q", requests)
 	}
 }
@@ -294,8 +300,8 @@ func TestTransientRawInsertPreservesExactBatchInEndpointLocalOutbox(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pub.insertRawBatchWithOutbox(context.Background(), defaultGmarketRawInsertTable, batches[0]); err != nil {
-		t.Fatal(err)
+	if err := pub.insertRawBatchWithOutbox(context.Background(), defaultGmarketRawInsertTable, batches[0]); !errors.Is(err, errRawDeliveryQueued) || shouldRetryStreamingPublish(err) {
+		t.Fatalf("queued delivery must remain unconfirmed without a streaming retry: %v", err)
 	}
 	if len(targetBodies) != 1 {
 		t.Fatalf("target attempts=%d, want one non-retried target request", len(targetBodies))
@@ -356,8 +362,8 @@ func TestUnknownInsertStatusIsNotRetriedAndIsPreservedInOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pub.insertRawBatchWithOutbox(context.Background(), defaultGmarketRawInsertTable, batches[0]); err != nil {
-		t.Fatal(err)
+	if err := pub.insertRawBatchWithOutbox(context.Background(), defaultGmarketRawInsertTable, batches[0]); !errors.Is(err, errRawDeliveryQueued) || shouldRetryStreamingPublish(err) {
+		t.Fatalf("ambiguous queued delivery must remain unconfirmed: %v", err)
 	}
 	if targetAttempts != 1 || outboxAttempts != 1 {
 		t.Fatalf("target attempts=%d outbox attempts=%d, want 1/1", targetAttempts, outboxAttempts)
@@ -372,6 +378,10 @@ func TestHealthyRawInsertDoesNotWriteOutboxOrMutation(t *testing.T) {
 		if strings.Contains(body, "outbox") || strings.HasPrefix(body, "ALTER TABLE") {
 			t.Errorf("healthy insert used recovery path: %s", body)
 		}
+		if strings.Contains(body, "uniqExact(event_uuid) AS unique_events") {
+			_, _ = writer.Write([]byte("{\"matched\":1,\"unique_events\":1}\n"))
+			return
+		}
 		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -380,8 +390,45 @@ func TestHealthyRawInsertDoesNotWriteOutboxOrMutation(t *testing.T) {
 	if err := pub.insertRawBatchWithOutbox(context.Background(), defaultKurlyRawInsertTable, batches[0]); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("healthy request count=%d, want 1", requests)
+	if requests != 2 {
+		t.Fatalf("healthy request count=%d, want insert plus visibility readback", requests)
+	}
+}
+
+func TestAcceptedRawInsertWithoutExactVisibilityKeepsOutboxAndBlocksPublication(t *testing.T) {
+	for _, readback := range []string{
+		`{"matched":0,"unique_events":0}`,
+		`{"matched":1,"unique_events":0}`,
+		`{"matched":2,"unique_events":1}`,
+		`{"matched":1,"unique_events":1}` + "\n" + `{ "matched":0,"unique_events":0 }`,
+		`{}`,
+	} {
+		t.Run(readback, func(t *testing.T) {
+			inserts, outboxWrites := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body := requestBody(t, r)
+				switch {
+				case strings.HasPrefix(body, "INSERT INTO "+defaultGmarketRawInsertTable+" "):
+					inserts++
+				case strings.Contains(body, "uniqExact(event_uuid) AS unique_events"):
+					_, _ = io.WriteString(w, readback+"\n")
+				case strings.HasPrefix(body, "INSERT INTO "+defaultShoppingRawOutboxTable+" "):
+					outboxWrites++
+				default:
+					t.Errorf("unexpected request: %s", body)
+				}
+			}))
+			defer server.Close()
+			pub := rawPublisherForTest(server)
+			batches, _ := canonicalRawBatches(defaultGmarketRawInsertTable, []clickHouseRawRow{{"product_code": "A-1", "event_uuid": "01900000-0000-7000-8000-000000000094"}}, 100)
+			err := pub.insertRawBatchWithOutbox(context.Background(), defaultGmarketRawInsertTable, batches[0])
+			if !errors.Is(err, errRawDeliveryQueued) || shouldRetryStreamingPublish(err) {
+				t.Fatalf("error=%v retry=%t, want unconfirmed durable delivery", err, shouldRetryStreamingPublish(err))
+			}
+			if inserts != 1 || outboxWrites != 1 {
+				t.Fatalf("target=%d outbox=%d, want one attempt and preserved bytes", inserts, outboxWrites)
+			}
+		})
 	}
 }
 

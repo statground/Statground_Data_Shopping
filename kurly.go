@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/statground/Statground_Data_Shopping/internal/lexicon"
 )
 
 var KurlyCollectEnabled = false
@@ -181,21 +182,29 @@ func RunKurlyCollection(ctx context.Context) {
 }
 
 func KurlyCollectListProducts(ctx context.Context) []Row {
-	keywords := KurlyDiverseKeywords(ctx)
+	selected, err := kurlyKeywordSelections(ctx)
+	if err != nil {
+		fmt.Println("[kurly]", err)
+		return nil
+	}
+	keywords := shoppingSelectionKeywords(selected)
 	fmt.Println("Kurly 사용할 검색어:", strings.Join(keywords, ", "))
 
 	allRows := []Row{}
 	for _, site := range KurlySites {
-		for _, keyword := range keywords {
+		for keywordIndex, keyword := range keywords {
 			keywordRows := []Row{}
+			queryFailed := false
 			for page := 1; page <= KurlySearchPagesPerKeyword; page++ {
 				rows, err := KurlySearchAPIProducts(ctx, keyword, page, site)
 				if err != nil {
+					queryFailed = true
 					fmt.Printf("[kurly] search_api error site=%s keyword=%s page=%d error=%s\n", site, keyword, page, err)
 				}
 				if len(rows) == 0 && page == 1 {
 					fallbackRows, fallbackErr := KurlySearchHTMLFallback(ctx, keyword)
 					if fallbackErr != nil {
+						queryFailed = true
 						fmt.Printf("[kurly] search_html_fallback error keyword=%s error=%s\n", keyword, fallbackErr)
 					}
 					rows = fallbackRows
@@ -211,8 +220,21 @@ func KurlyCollectListProducts(ctx context.Context) []Row {
 				keywordRows = keywordRows[:KurlyProductsPerKeyword]
 			}
 			allRows = append(allRows, keywordRows...)
+			for _, selection := range selected {
+				if selection.Keyword != keyword {
+					continue
+				}
+				emptyOutcome := "empty"
+				if queryFailed {
+					emptyOutcome = "unavailable"
+				}
+				finishShoppingKeywords(ctx, []lexicon.Selection{selection}, keywordRows, emptyOutcome)
+				break
+			}
 
-			if KurlyTotalTargetProducts > 0 && len(allRows) >= KurlyTotalTargetProducts*2 {
+			// Finish a curated/dictionary pair before stopping early so a small
+			// product target cannot consume only one side of the selected plan.
+			if keywordIndex%2 == 1 && KurlyTotalTargetProducts > 0 && len(allRows) >= KurlyTotalTargetProducts*2 {
 				break
 			}
 		}
@@ -222,23 +244,25 @@ func KurlyCollectListProducts(ctx context.Context) []Row {
 	}
 
 	unique := dedupeRowsByCode(allRows)
-	selected := KurlyBalancedLimitRows(unique, KurlyTotalTargetProducts)
-	for i := range selected {
-		selected[i]["순번"] = strconv.Itoa(i + 1)
+	limitedRows := KurlyBalancedLimitRows(unique, KurlyTotalTargetProducts)
+	for i := range limitedRows {
+		limitedRows[i]["순번"] = strconv.Itoa(i + 1)
 	}
-	return selected
+	return limitedRows
 }
 
 func KurlyDiverseKeywords(ctx context.Context) []string {
+	selected, err := kurlyKeywordSelections(ctx)
+	if err != nil {
+		fmt.Println("[kurly]", err)
+		return nil
+	}
+	return shoppingSelectionKeywords(selected)
+}
+
+func kurlyKeywordSelections(ctx context.Context) ([]lexicon.Selection, error) {
 	if len(KurlySearchKeywordsOverride) > 0 {
-		keywords := append([]string{}, KurlySearchKeywordsOverride...)
-		rand.Shuffle(len(keywords), func(i, j int) {
-			keywords[i], keywords[j] = keywords[j], keywords[i]
-		})
-		if KurlyRandomKeywordCount > 0 && len(keywords) > KurlyRandomKeywordCount {
-			keywords = keywords[:KurlyRandomKeywordCount]
-		}
-		return keywords
+		return selectShoppingKeywords(ctx, "kurly", KurlySearchKeywordsOverride, KurlyRandomKeywordCount, true)
 	}
 
 	keywords := []string{}
@@ -256,13 +280,7 @@ func KurlyDiverseKeywords(ctx context.Context) []string {
 
 	keywords = append(keywords, KurlyDefaultDiverseKeywords...)
 	keywords = UniqueKeepOrder(keywords)
-	rand.Shuffle(len(keywords), func(i, j int) {
-		keywords[i], keywords[j] = keywords[j], keywords[i]
-	})
-	if KurlyRandomKeywordCount > 0 && len(keywords) > KurlyRandomKeywordCount {
-		keywords = keywords[:KurlyRandomKeywordCount]
-	}
-	return keywords
+	return selectShoppingKeywords(ctx, "kurly", keywords, KurlyRandomKeywordCount, true)
 }
 
 func KurlySearchAPIProducts(ctx context.Context, keyword string, page int, site string) ([]Row, error) {

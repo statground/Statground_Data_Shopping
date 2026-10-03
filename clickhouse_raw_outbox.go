@@ -50,6 +50,8 @@ type rawDeliveryUnknownError struct {
 	err error
 }
 
+var errRawDeliveryQueued = errors.New("raw batch preserved in outbox; target visibility unconfirmed; manual replay required")
+
 func (e *rawDeliveryUnknownError) Error() string { return e.err.Error() }
 func (e *rawDeliveryUnknownError) Unwrap() error { return e.err }
 
@@ -254,6 +256,15 @@ func (p *ClickHouseRawPublisher) insertRawBatchWithOutbox(ctx context.Context, t
 		return err
 	}
 	targetErr := p.postBodySingleAttempt(ctx, body)
+	retailTarget := table == p.cfg.GmarketTable || table == p.cfg.KurlyTable
+	if targetErr == nil && retailTarget {
+		visible, verifyErr := p.rawTargetBatchState(ctx, table, batch.eventUUIDs)
+		if verifyErr != nil {
+			targetErr = &rawDeliveryUnknownError{err: fmt.Errorf("raw visibility readback failed: %w", verifyErr)}
+		} else if !visible {
+			targetErr = &rawDeliveryUnknownError{err: errors.New("raw visibility readback did not confirm the batch")}
+		}
+	}
 	if targetErr == nil {
 		return nil
 	}
@@ -266,6 +277,9 @@ func (p *ClickHouseRawPublisher) insertRawBatchWithOutbox(ctx context.Context, t
 		return fmt.Errorf("target transient and raw outbox persistence failed: target=%w outbox=%w", targetErr, err)
 	}
 	fmt.Printf("[clickhouse] preserved raw batch in endpoint-local outbox table=%s target=%s rows=%d token=%s\n", p.cfg.OutboxTable, table, batch.rowCount, batch.token)
+	if retailTarget {
+		return fmt.Errorf("%w: %w", errRawDeliveryQueued, targetErr)
+	}
 	return nil
 }
 
@@ -580,6 +594,9 @@ FORMAT JSONEachRow`, target, strings.Join(values, ", "))
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&state); err != nil {
 		return false, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("raw target readback returned multiple records")
 	}
 	want := uint64(len(eventUUIDs))
 	if state.Matched == 0 && state.UniqueEvents == 0 {

@@ -222,6 +222,9 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	if len(malls) > 1000 {
 		return nil, fmt.Errorf("Adpick mall list exceeds bounded limit")
 	}
+	if client.coverage != nil {
+		observeAdpickMallDirectory(client.coverage, malls, client.key)
+	}
 	requested := map[string]bool{}
 	if directoryOnly {
 		requested["travel"], requested["services"] = true, true

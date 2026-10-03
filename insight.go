@@ -315,6 +315,7 @@ type insightRefreshVerification struct {
 
 type shoppingInsightRefreshClient interface {
 	preflightInsightPublishTargets(context.Context, insightRefreshTables) error
+	verifyInsightRawIngestion(context.Context) error
 	fetchInsightProducts(context.Context) ([]insightProduct, error)
 	insertInsightSnapshots(context.Context, string, []insightSnapshotInsert) error
 	insertInsightKeywordSearchMart(context.Context, string, []insightKeywordSearchMartInsert) error
@@ -361,6 +362,9 @@ func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefres
 	if err := client.preflightInsightPublishTargets(ctx, tables); err != nil {
 		return fmt.Errorf("shopping insight publish preflight failed: %w", err)
 	}
+	if err := client.verifyInsightRawIngestion(ctx); err != nil {
+		return fmt.Errorf("shopping insight raw ingestion is incomplete: %w", err)
+	}
 	products, err := client.fetchInsightProducts(ctx)
 	if err != nil {
 		return fmt.Errorf("shopping insight source fetch failed: %w", err)
@@ -395,6 +399,9 @@ func runShoppingInsightRefresh(ctx context.Context, client shoppingInsightRefres
 	}
 	if err := validateInsightRefreshVerification(products, snapshots, searchRows, version, verification); err != nil {
 		return err
+	}
+	if err := client.verifyInsightRawIngestion(ctx); err != nil {
+		return fmt.Errorf("shopping insight raw ingestion changed before publication: %w", err)
 	}
 
 	generatedText := FormatCHDateTime64Millis(generatedAt)

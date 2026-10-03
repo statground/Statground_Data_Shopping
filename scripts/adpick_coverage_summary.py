@@ -31,6 +31,14 @@ def render(report):
                       "excluded merchants are never relabeled as travel or services."])
     lines.extend(["", f"Retained earlier offers: {int(report.get('retained_previous_offers', 0))}",
                   f"Evicted oldest offers at bounded capacity: {int(report.get('evicted_oldest_offers', 0))}"])
+    directory = report.get("mall_directory", [])
+    lines.extend(["", f"Observed reward malls: {len(directory)}",
+                  f"Prior verified directory available: {report.get('mall_baseline_available') is True}",
+                  f"New mall codes: {', '.join(report.get('new_mall_codes', [])) or 'none observed'}",
+                  f"Removed mall codes: {', '.join(report.get('removed_mall_codes', [])) or 'none observed'}",
+                  f"Missing allowlisted merchants: {', '.join(report.get('missing_eligible_merchants', [])) or 'none'}",
+                  f"Malls needing identity review: {sum(item.get('status') == 'review_required' for item in directory)}",
+                  "Directory observations do not authorize new malls or establish product-search support."])
     for query in report.get("queries", []):
         # Fields and two short title samples are sanitized by the collector.
         lines.extend(["", "```json", json.dumps({key: query.get(key) for key in
