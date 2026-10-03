@@ -2262,6 +2262,9 @@ func normalizeInsightCategory(provider, raw, categoryPath, searchKeyword, produc
 		return insightStandardCategory(raw)
 	case insightStandardCategory(searchKeyword) != "":
 		return insightStandardCategory(searchKeyword)
+	// Infer seasonings from product names only after every existing category rule.
+	case containsAny(productContext, "양꼬치", "시즈닝", "향신료", "쯔란", "오레가노", "바질", "계피", "후추"):
+		return "식품"
 	default:
 		return ""
 	}

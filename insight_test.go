@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -587,4 +588,70 @@ func countInsightDealProviders(items []insightDealCandidate) map[string]int {
 		counts[item.Provider]++
 	}
 	return counts
+}
+
+func TestInsightSeasoningInferencePreservesCategoryPriority(t *testing.T) {
+	for _, tc := range []struct{ name, raw, path, query, product, want string }{
+		{name: "canary seasoning", raw: "페퍼", path: "페퍼", query: "페퍼", product: "[허브&스파이스마켓] 양꼬치 시즈닝54g (쯔란)", want: "식품"},
+		{name: "canary oregano", raw: "페퍼", path: "페퍼", query: "페퍼", product: "[ISFI] 오레가노홀 12g", want: "식품"},
+		{name: "canary basil", raw: "페퍼", path: "페퍼", query: "페퍼", product: "[ISFI] 바질", want: "식품"},
+		{name: "canary cinnamon", raw: "페퍼", path: "페퍼", query: "페퍼", product: "[허브&스파이스마켓] 계피가루 42g", want: "식품"},
+		{name: "query alone stays unknown", raw: "페퍼", path: "페퍼", query: "페퍼", product: "분류 불가 상품", want: ""},
+		{name: "seasoning query alone stays unknown", query: "시즈닝", product: "분류 불가 상품", want: ""},
+		{name: "stationery priority", product: "바질 재배 노트", want: "도서/취미/문구"},
+		{name: "beauty priority", product: "계피 향 바디워시", want: "뷰티/헬스"},
+		{name: "household priority", product: "계피 향 휴지", want: "생활/주방"},
+		{name: "explicit category priority", raw: "문구", product: "오레가노홀", want: "도서/취미/문구"},
+		{name: "milk unchanged", raw: "우유", path: "우유", query: "우유", product: "유기농 우유 750mL", want: "식품"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeInsightCategory("kurly", tc.raw, tc.path, tc.query, tc.product); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInsightSeasoningCanaryFlowsThroughFetchAndKeywordEvidence(t *testing.T) {
+	canary := []struct {
+		code, name string
+		price      int
+	}{
+		{"1000638379", "[허브&스파이스마켓] 양꼬치 시즈닝54g (쯔란)", 3850},
+		{"5013685", "[ISFI] 오레가노홀 12g", 3840},
+		{"5063639", "[ISFI] 바질", 2980},
+		{"5066721", "[허브&스파이스마켓] 계피가루 42g", 3300},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range canary {
+			_, _ = fmt.Fprintf(w, `{"provider":"kurly","product_code":%q,"product_name":%q,"source_category_raw":"페퍼","category_path":"페퍼","search_keyword":"페퍼","price_krw":%d,"collected_at":"2026-10-03 14:28:06"}`+"\n", p.code, p.name, p.price)
+		}
+	}))
+	defer server.Close()
+	client := &insightCHClient{url: server.URL, user: "user", password: "password", client: server.Client()}
+	products, err := client.fetchInsightProducts(context.Background())
+	if err != nil || len(products) != len(canary) {
+		t.Fatalf("canary products=%#v err=%v", products, err)
+	}
+	for i, p := range products {
+		if p.ProductCode != canary[i].code || p.PriceKRW != canary[i].price || p.SourceCategory != "식품" || p.SearchKeyword != "페퍼" {
+			t.Fatalf("canary source changed: %#v", p)
+		}
+	}
+	rows := buildInsightKeywordSearchMartScope(products, "all", "", NewUUIDv7(), "2026-10-03 15:11:18", 1791007878131)
+	seen := map[string]bool{}
+	for _, row := range rows {
+		var evidence []insightProduct
+		if err := json.Unmarshal([]byte(row.ProductsJSON), &evidence); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range evidence {
+			seen[p.ProductCode] = true
+		}
+	}
+	for _, p := range canary {
+		if !seen[p.code] {
+			t.Fatalf("new product %s missing from keyword evidence", p.code)
+		}
+	}
 }
