@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -86,6 +87,145 @@ func TestBufferedRowPublisherDoesNotRetryAmbiguousFailureOnFlush(t *testing.T) {
 	}
 	if shouldRetryStreamingPublish(publisher.err) {
 		t.Fatal("ambiguous streaming publish entered caller retry path")
+	}
+}
+
+func TestBufferedRowPublisherDoesNotRetryPermanentClickHouseHTTPFailures(t *testing.T) {
+	cases := []struct {
+		status int
+		code   int
+	}{
+		{500, 6}, {500, 27}, {500, 47}, {500, 60},
+		{500, 62}, {500, 81}, {403, 497}, {401, 516},
+		{400, 0}, {401, 0}, {403, 0}, {404, 0},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("status%d_code%d", tc.status, tc.code), func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests++
+				if body := requestBody(t, request); !strings.HasPrefix(body, "INSERT INTO "+defaultGmarketRawInsertTable+" ") {
+					t.Errorf("unexpected non-target request: %s", body)
+				}
+				writer.WriteHeader(tc.status)
+				_, _ = fmt.Fprintf(writer, "Code: %d. DB::Exception: rejected", tc.code)
+			}))
+			defer server.Close()
+			publisher := &GmarketClickHouseRowPublisher{pub: rawPublisherForTest(server), runUUID: "retry-test"}
+			batcher := NewBufferedRowPublisher(publisher, 2)
+			_ = batcher.Add(Row{"상품코드": "1"})
+			_ = batcher.Add(Row{"상품코드": "2"})
+			_ = batcher.Add(Row{"상품코드": "3"})
+			err := batcher.Flush()
+			if err == nil {
+				t.Fatal("permanent failure was reported as successful")
+			}
+			// Exercise the same final recovery decision as the Gmarket/Kurly
+			// callers after Add and Flush have already seen the failure.
+			if shouldRetryStreamingPublish(err) {
+				_ = publisher.Publish(batcher.PendingRows())
+			}
+			if requests != 1 {
+				t.Fatalf("target requests=%d, want one across Add/Flush/caller", requests)
+			}
+			if len(batcher.PendingRows()) != 3 {
+				t.Fatal("permanent failure discarded pending rows")
+			}
+		})
+	}
+}
+
+func TestBufferedRowPublisherKeepsUnknownClickHouseHTTPFailuresRecoverable(t *testing.T) {
+	targetRequests := 0
+	readbacks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body := requestBody(t, request)
+		if strings.HasPrefix(body, "INSERT INTO "+defaultGmarketRawInsertTable+" ") {
+			targetRequests++
+			if targetRequests == 1 {
+				writer.WriteHeader(http.StatusBadRequest)
+				_, _ = writer.Write([]byte("Code: 12345. DB::Exception: unknown rejection"))
+			}
+			return
+		}
+		if strings.HasPrefix(body, "SELECT") && strings.Contains(body, "FROM "+defaultGmarketRawInsertTable) {
+			readbacks++
+			_, _ = writer.Write([]byte("{\"matched\":2,\"unique_events\":2}\n"))
+			return
+		}
+		t.Errorf("unexpected request: %s", body)
+		writer.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	publisher := &GmarketClickHouseRowPublisher{pub: rawPublisherForTest(server), runUUID: "retry-test"}
+	batcher := NewBufferedRowPublisher(publisher, 2)
+	_ = batcher.Add(Row{"상품코드": "1"})
+	_ = batcher.Add(Row{"상품코드": "2"})
+	if err := batcher.Flush(); err != nil {
+		t.Fatalf("existing unknown-error recovery failed: %v", err)
+	}
+	if targetRequests != 2 || readbacks != 1 || len(batcher.PendingRows()) != 0 {
+		t.Fatalf("target/readback/pending=%d/%d/%d, want 2/1/0", targetRequests, readbacks, len(batcher.PendingRows()))
+	}
+}
+
+func TestBufferedRowPublisherDoesNotRetryQueuedClickHouseHTTPFailures(t *testing.T) {
+	for _, code := range []int{252, 735} {
+		t.Run(fmt.Sprintf("code%d", code), func(t *testing.T) {
+			targetRequests, outboxRequests := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				body := requestBody(t, request)
+				switch {
+				case strings.HasPrefix(body, "INSERT INTO "+defaultGmarketRawInsertTable+" "):
+					targetRequests++
+					writer.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = fmt.Fprintf(writer, "Code: %d. DB::Exception: unavailable", code)
+				case strings.HasPrefix(body, "INSERT INTO "+defaultShoppingRawOutboxTable+" "):
+					outboxRequests++
+				default:
+					t.Errorf("unexpected request: %s", body)
+					writer.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			publisher := &GmarketClickHouseRowPublisher{pub: rawPublisherForTest(server), runUUID: "retry-test"}
+			batcher := NewBufferedRowPublisher(publisher, 2)
+			_ = batcher.Add(Row{"상품코드": "1"})
+			_ = batcher.Add(Row{"상품코드": "2"})
+			err := batcher.Flush()
+			if !errors.Is(err, errRawDeliveryQueued) {
+				t.Fatalf("queued delivery lost its original error: %v", err)
+			}
+			if shouldRetryStreamingPublish(err) {
+				_ = publisher.Publish(batcher.PendingRows())
+			}
+			if targetRequests != 1 || outboxRequests != 1 || len(batcher.PendingRows()) != 2 {
+				t.Fatalf("target/outbox/pending=%d/%d/%d, want 1/1/2", targetRequests, outboxRequests, len(batcher.PendingRows()))
+			}
+		})
+	}
+}
+
+func TestStreamingPublishRetryPreservesExistingFailureBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"confirmed_prewrite_transient", errors.New("temporary publisher failure before submission"), true},
+		{"transient_clickhouse_400", &clickHouseHTTPStatusError{status: 400, code: 745}, true},
+		{"transient_clickhouse_503", &clickHouseHTTPStatusError{status: 503, code: 252}, true},
+		{"unknown_clickhouse_code", &clickHouseHTTPStatusError{status: 400, code: 12345}, true},
+		{"wrapped_permanent", fmt.Errorf("insert failed: %w", &clickHouseHTTPStatusError{status: 500, code: 60}), false},
+		{"ambiguous", &rawDeliveryUnknownError{err: context.DeadlineExceeded}, false},
+		{"queued", fmt.Errorf("saved: %w", errRawDeliveryQueued), false},
+		{"wrong_endpoint", fmt.Errorf("identity: %w", errDirectEndpointHostnameMismatch), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if retry := shouldRetryStreamingPublish(tc.err); retry != tc.retry {
+				t.Fatalf("retry=%t, want %t", retry, tc.retry)
+			}
+		})
 	}
 }
 

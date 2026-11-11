@@ -79,7 +79,27 @@ func (b *BufferedRowPublisher) Flush() error {
 }
 
 func shouldRetryStreamingPublish(err error) bool {
-	return err != nil && !isAmbiguousRawInsertError(err) && !errors.Is(err, errDirectEndpointHostnameMismatch) && !errors.Is(err, errRawDeliveryQueued)
+	if err == nil || isAmbiguousRawInsertError(err) || errors.Is(err, errDirectEndpointHostnameMismatch) || errors.Is(err, errRawDeliveryQueued) {
+		return false
+	}
+	var statusErr *clickHouseHTTPStatusError
+	if errors.As(err, &statusErr) {
+		// These contract/authentication failures cannot be repaired by sending
+		// the same rows again. Keep unknown and transient responses on their
+		// existing path; in particular, ClickHouse can return transient codes
+		// with HTTP 400.
+		switch statusErr.code {
+		case 6, 27, 47, 60, 62, 81, 497, 516:
+			return false
+		}
+		if statusErr.code == 0 {
+			switch statusErr.status {
+			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (b *BufferedRowPublisher) PendingRows() []Row {
