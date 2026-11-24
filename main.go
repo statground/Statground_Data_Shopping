@@ -3420,6 +3420,13 @@ func RunGmarketCollection(rootCtx context.Context) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--adpick-mall-search-coverage" {
+		if err := runAdpickMallSearchCoverage(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--validate-adpick-harvest" {
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: --validate-adpick-harvest <file>")

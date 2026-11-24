@@ -261,3 +261,29 @@ jobs:
             ${{ env.ADPICK_HARVEST_FILE }}
           if-no-files-found: warn
           retention-days: 30
+
+  adpick_mall_search_coverage:
+    needs: adpick_catalog
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.event.schedule == '25 2 * * *' && vars.ADPICK_CATALOG_ENABLED != 'false' && vars.ADPICK_BIZ_SEARCHABLE_MALL_CODES != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 32
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Search the current BIZ directory and verified account codes
+        env:
+          ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
+          ADPICK_BIZ_SEARCHABLE_MALL_CODES: ${{ vars.ADPICK_BIZ_SEARCHABLE_MALL_CODES }}
+        run: go run . --adpick-mall-search-coverage > "$RUNNER_TEMP/adpick-mall-search-coverage.json"
+      - name: Retain coverage receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: adpick-mall-search-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/adpick-mall-search-coverage.json
+          if-no-files-found: warn
+          retention-days: 14
