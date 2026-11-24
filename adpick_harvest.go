@@ -146,8 +146,6 @@ func diagnosticAdpickQueries() []adpickQuery {
 
 type adpickDiagnosticSample struct {
 	Code   string            `json:"cp_code"`
-	Name   string            `json:"cp_name"`
-	Title  string            `json:"title"`
 	Fields map[string]string `json:"field_types"`
 }
 
@@ -205,34 +203,22 @@ func (o *adpickOffer) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func diagnosticAdpickText(raw, key string, limit int) string {
-	if key != "" {
-		raw = strings.ReplaceAll(raw, key, "[redacted]")
-	}
-	value := adpickText(raw, limit)
-	lower := strings.ToLower(value)
-	if strings.Contains(lower, "http:") || strings.Contains(lower, "https:") || strings.Contains(lower, "api_key") || strings.Contains(lower, "apikey") {
-		return "[redacted]"
-	}
-	return value
-}
-
 func (s *adpickQueryCoverage) observe(o adpickOffer, key string) {
 	code := o.Code
 	if code == "" {
 		code = "<missing>"
-	} else if !adpickCodePattern.MatchString(code) || code == key {
+	} else if !adpickCodePattern.MatchString(code) || (key != "" && strings.Contains(code, key)) {
 		code = "<invalid>"
 	}
 	s.MerchantCodes[code]++
 	if len(s.Samples) < 2 {
 		fields := map[string]string{}
 		for name, kind := range o.FieldTypes {
-			if name != key {
+			if key == "" || !strings.Contains(name, key) {
 				fields[name] = kind
 			}
 		}
-		s.Samples = append(s.Samples, adpickDiagnosticSample{code, diagnosticAdpickText(o.Name, key, 80), diagnosticAdpickText(o.Title, key, 160), fields})
+		s.Samples = append(s.Samples, adpickDiagnosticSample{Code: code, Fields: fields})
 	}
 }
 

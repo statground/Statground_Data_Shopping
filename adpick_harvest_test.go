@@ -201,15 +201,20 @@ func TestAdpickEmptyHarvestRetainsVerifiedPriorOffersAndFreshObservationWins(t *
 	}
 }
 
-func TestAdpickDiagnosticsPreserveFieldTypesAndRedactSecretsAndURLs(t *testing.T) {
+func TestAdpickDiagnosticsPreserveFieldTypesWithoutProviderContent(t *testing.T) {
 	var offer adpickOffer
-	if err := json.Unmarshal([]byte(`{"cp_name":"Mall","title":"fixture-secret https://private.invalid/x","product_name":"alternate"}`), &offer); err != nil {
+	if err := json.Unmarshal([]byte(`{"cp_name":"Excluded Mall","title":"Unapproved product","product_name":"alternate","fixture_secret_field":"https://private.invalid/x"}`), &offer); err != nil {
 		t.Fatal(err)
 	}
 	s := adpickQueryCoverage{MerchantCodes: map[string]int{}}
-	s.observe(offer, "fixture-secret")
+	s.observe(offer, "fixture_secret")
 	b, _ := json.Marshal(s)
-	if strings.Contains(string(b), "fixture-secret") || strings.Contains(string(b), "private.invalid") || s.MerchantCodes["<missing>"] != 1 || s.Samples[0].Fields["cp_code"] != "missing" || s.Samples[0].Fields["product_name"] != "string" {
+	for _, forbidden := range []string{"Excluded Mall", "Unapproved product", "alternate", "fixture_secret", "private.invalid"} {
+		if strings.Contains(string(b), forbidden) {
+			t.Fatalf("provider content in coverage diagnostics: %s", b)
+		}
+	}
+	if s.MerchantCodes["<missing>"] != 1 || s.Samples[0].Fields["cp_code"] != "missing" || s.Samples[0].Fields["product_name"] != "string" {
 		t.Fatalf("unsafe or incomplete diagnostics: %s", b)
 	}
 	t.Setenv("ADPICK_QUERY_PROFILE", "diagnostic")
