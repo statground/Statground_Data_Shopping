@@ -114,6 +114,26 @@ func TestAdpickReplayRejectsAmbiguousCorruptAndUnsafeEnvelopes(t *testing.T) {
 	}
 }
 
+func TestAdpickReplayIncompleteCheckpointIsDistinctFromCorruption(t *testing.T) {
+	harvest, now := replayTestHarvest()
+	harvest.CollectionComplete = false
+	path := writeReplayTestFile(t, harvest)
+	if _, err := loadAdpickReplayHarvest(path, now); !errors.Is(err, errAdpickReplayIncomplete) {
+		t.Fatalf("expected an incomplete collection, got %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "Observed hotel", "Altered hotel", 1))
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAdpickReplayHarvest(path, now); err == nil || errors.Is(err, errAdpickReplayIncomplete) {
+		t.Fatalf("corruption must not be handled as an incomplete collection: %v", err)
+	}
+}
+
 func TestAdpickReplayValidDigestDoesNotAuthorizeInvalidRecords(t *testing.T) {
 	for _, name := range []string{"excluded mall", "wrong CP", "wrong merchant key", "wrong category", "wrong item hash", "duplicate item", "missing merchant", "unsafe affiliate", "unsafe image", "price mismatch", "future observation", "mixed run", "mixed generation", "invalid time", "credential", "query count", "incomplete coverage"} {
 		t.Run(name, func(t *testing.T) {

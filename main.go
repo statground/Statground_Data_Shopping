@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	htmlpkg "html"
@@ -3419,6 +3420,20 @@ func RunGmarketCollection(rootCtx context.Context) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--validate-adpick-harvest" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: --validate-adpick-harvest <file>")
+			os.Exit(2)
+		}
+		if _, err := loadAdpickReplayHarvest(os.Args[2], NowKST()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, errAdpickReplayIncomplete) {
+				os.Exit(3)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	ApplyEnvConfig()
 	ApplyKurlyEnvConfig()
 	if envBool("LEXICON_PLAN_ONLY", false) {

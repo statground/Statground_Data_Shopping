@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+var errAdpickReplayIncomplete = errors.New("Adpick replay harvest collection is incomplete")
 
 type adpickReplayHarvest struct {
 	Schema             string                `json:"schema"`
@@ -52,13 +55,16 @@ func loadAdpickReplayHarvest(path string, now time.Time) (*adpickReplayHarvest, 
 	}
 	encoded, err := json.Marshal(harvest.Records)
 	if err != nil || harvest.Schema != "adpick.harvest.v2" || !rawOutboxUUIDPattern.MatchString(harvest.RunUUID) ||
-		harvest.Planned < 0 || harvest.Planned > adpickMaximumQueries || harvest.Completed != harvest.Planned ||
-		!harvest.CollectionComplete || len(harvest.Records) < 1 || len(harvest.Records) > 4808 ||
+		harvest.Planned < 0 || harvest.Planned > adpickMaximumQueries || harvest.Completed < 0 || harvest.Completed > harvest.Planned ||
+		(harvest.CollectionComplete && harvest.Completed != harvest.Planned) || len(harvest.Records) < 1 || len(harvest.Records) > 4808 ||
 		harvest.RecordsSHA256 != fmt.Sprintf("%x", sha256.Sum256(encoded)) {
 		return nil, fmt.Errorf("Adpick replay harvest integrity rejected")
 	}
 	if err := validateAdpickReplayRecords(harvest.Records, harvest.RunUUID, now); err != nil {
 		return nil, err
+	}
+	if !harvest.CollectionComplete {
+		return nil, errAdpickReplayIncomplete
 	}
 	return &harvest, nil
 }

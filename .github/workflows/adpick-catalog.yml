@@ -197,11 +197,29 @@ jobs:
 
       - name: Replay verified prior harvest
         id: replay
+        env:
+          REQUESTED_RUN_ID: ${{ inputs.replay_run_id || '' }}
         run: |
-          if test -f /tmp/adpick-replay/adpick-harvest.json; then
-            ADPICK_REPLAY_HARVEST_FILE=/tmp/adpick-replay/adpick-harvest.json go run .
-            echo 'published=true' >> "$GITHUB_OUTPUT"
+          harvest=/tmp/adpick-replay/adpick-harvest.json
+          if ! test -f "$harvest"; then
+            if test -n "$REQUESTED_RUN_ID"; then
+              echo 'Explicit replay artifact contains no harvest' >&2
+              exit 1
+            fi
+            exit 0
           fi
+          go build -o "$RUNNER_TEMP/adpick-catalog" .
+          status=0
+          "$RUNNER_TEMP/adpick-catalog" --validate-adpick-harvest "$harvest" || status=$?
+          if test "$status" = 3 && test -z "$REQUESTED_RUN_ID"; then
+            echo '::warning::Automatically selected harvest is incomplete. Retaining it and skipping replay.'
+            exit 0
+          fi
+          if test "$status" != 0; then
+            exit "$status"
+          fi
+          ADPICK_REPLAY_HARVEST_FILE="$harvest" "$RUNNER_TEMP/adpick-catalog"
+          echo 'published=true' >> "$GITHUB_OUTPUT"
 
       - name: Gate ClickHouse catalog writes on storage pressure
         if: ${{ steps.replay.outputs.published != 'true' }}
