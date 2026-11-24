@@ -17,9 +17,10 @@ const adpickWorkflowEventLimit = 256 << 10
 var errAdpickCollectionUnauthorized = errors.New("Adpick fresh collection requires the daily travel/services schedule or confirmed human workflow dispatch")
 
 type adpickCollectionPlan struct {
-	queries       []adpickQuery
-	directoryOnly bool
-	searchLimit   int
+	queries        []adpickQuery
+	directoryOnly  bool
+	useKeywordPool bool
+	searchLimit    int
 }
 
 func authorizeAdpickCollection(actions, eventName, workflowRef string, payload []byte) (scheduled bool, err error) {
@@ -81,7 +82,10 @@ func adpickCollectionPlanFromEnv() (adpickCollectionPlan, error) {
 	if scheduled {
 		// The daily exemption always keeps its existing standard travel/services
 		// queries and limit, regardless of profile or custom-query environment.
-		return adpickCollectionPlan{queries: append([]adpickQuery(nil), defaultAdpickQueries...), searchLimit: 20}, nil
+		return adpickCollectionPlan{
+			queries: append([]adpickQuery(nil), defaultAdpickQueries...), searchLimit: 20,
+			useKeywordPool: os.Getenv("ADPICK_KEYWORD_DISCOVERY_ENABLED") == "true",
+		}, nil
 	}
 	queries, err := adpickQueriesFromEnv()
 	if err != nil {

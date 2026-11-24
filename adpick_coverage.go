@@ -12,7 +12,7 @@ import (
 type adpickQueryCoverage struct {
 	Vertical      string                   `json:"vertical"`
 	Category      string                   `json:"category"`
-	Keyword       string                   `json:"keyword"`
+	Keyword       string                   `json:"keyword,omitempty"`
 	Returned      int                      `json:"returned"`
 	NewOffers     int                      `json:"new_offers"`
 	Duplicates    int                      `json:"duplicates"`
@@ -42,6 +42,7 @@ type adpickCoverage struct {
 	UpdatedAt                string                            `json:"updated_at"`
 	QueriesPlanned           int                               `json:"queries_planned"`
 	QueriesCompleted         int                               `json:"queries_completed"`
+	KeywordPoolQueries       int                               `json:"keyword_pool_queries,omitempty"`
 	Requests                 int                               `json:"request_attempts"`
 	Retries                  int                               `json:"retries"`
 	CollectionComplete       bool                              `json:"collection_complete"`

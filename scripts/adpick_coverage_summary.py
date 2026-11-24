@@ -8,7 +8,8 @@ def render(report):
     lines = ["### Adpick Travel and Services collection", ""]
     for label, key in [("Searches completed", "queries_completed"),
                        ("Searches planned", "queries_planned"),
-                       ("API attempts", "request_attempts"), ("Retries", "retries")]:
+                       ("API attempts", "request_attempts"), ("Retries", "retries"),
+                       ("Committed dictionary query slots", "keyword_pool_queries")]:
         lines.append(f"- {label}: {int(report.get(key, 0))}")
     for label, key in [("Complete upstream batch", "collection_complete"),
                        ("Verified merchant directory", "discovery_complete"),

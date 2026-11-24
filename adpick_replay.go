@@ -160,7 +160,7 @@ func validateAdpickReplayRecords(records []adpickCatalogRecord, runUUID string, 
 			merchants[row.MerchantCode] = row
 			merchantKeys[row.MerchantKey] = true
 		case "offer":
-			if !validAdpickCategory(row.Vertical, row.CategorySlug) || row.AffiliateURL == "" || row.ItemKey != fmt.Sprintf("%x", sha256.Sum256([]byte(row.MerchantCode+"\x1f"+row.AffiliateURL))) || row.Description != "" || strings.TrimSpace(row.SearchKeyword) != row.SearchKeyword || row.SearchKeyword == "" || len([]rune(row.SearchKeyword)) > 100 || strings.ContainsAny(row.SearchKeyword, "\r\n\t") {
+			if !validAdpickCategory(row.Vertical, row.CategorySlug) || row.AffiliateURL == "" || row.ItemKey != fmt.Sprintf("%x", sha256.Sum256([]byte(row.MerchantCode+"\x1f"+row.AffiliateURL))) || row.Description != "" || strings.TrimSpace(row.SearchKeyword) != row.SearchKeyword || len([]rune(row.SearchKeyword)) > 100 || strings.ContainsAny(row.SearchKeyword, "\r\n\t") {
 				return fmt.Errorf("Adpick replay offer rejected at index %d", i)
 			}
 		default:

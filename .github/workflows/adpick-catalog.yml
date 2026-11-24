@@ -38,6 +38,8 @@ jobs:
       # Manual runs may still select a wider profile through the repository variable.
       ADPICK_QUERY_PROFILE: ${{ github.event_name == 'schedule' && 'standard' || (vars.ADPICK_QUERY_PROFILE || 'standard') }}
       ADPICK_SEARCH_LIMIT: '20'
+      ADPICK_KEYWORD_DISCOVERY_ENABLED: ${{ vars.ADPICK_KEYWORD_DISCOVERY_ENABLED || 'false' }}
+      LEXICON_RUN_ID: ${{ github.run_id }}
       ADPICK_SEARCH_QUERIES_JSON: ${{ github.event_name == 'schedule' && '' || (github.event_name == 'workflow_dispatch' && vars.ADPICK_SEARCH_QUERIES_JSON || '') }}
       ADPICK_COVERAGE_REPORT: /tmp/adpick-coverage.json
       ADPICK_PREVIOUS_COVERAGE_REPORT: /tmp/adpick-directory-baseline/adpick-coverage.json
@@ -231,10 +233,18 @@ jobs:
             local:Data_Shopping_Log.shopping_raw_direct_insert_outbox
         run: python3 scripts/clickhouse_pressure_gate.py
 
+      - name: Gate the scheduled keyword selection ledger
+        if: ${{ steps.replay.outputs.published != 'true' && github.event_name == 'schedule' && env.ADPICK_KEYWORD_DISCOVERY_ENABLED == 'true' }}
+        env:
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: replica:Data_Content_Lexicon.keyword_selection_log_local
+          CLICKHOUSE_PRESSURE_GATE_MAX_IOWAIT_NORMALIZED: '0.40'
+        run: python3 scripts/clickhouse_pressure_gate.py
+
       - name: Collect verify and publish travel and services catalogs
         if: ${{ steps.replay.outputs.published != 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.confirm_collection == 'true')) }}
         env:
           ADPICK_BIZ_API_KEY: ${{ secrets.ADPICK_API }}
+          LEXICON_STATE_DIR: ${{ runner.temp }}/adpick-lexicon
         run: go run .
 
       - name: Summarize actual search coverage

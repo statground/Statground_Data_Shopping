@@ -27,6 +27,7 @@ type adpickClient struct {
 	coverage          *adpickCoverage
 	progress          func() error
 	directoryOnly     bool
+	privateKeywords   bool
 }
 
 func newAdpickClient(key string) (*adpickClient, error) {

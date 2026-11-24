@@ -275,7 +275,10 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 	}
 	seenOffers := map[string]bool{}
 	for _, q := range queries {
-		stats := adpickQueryCoverage{Vertical: q.Vertical, Category: q.Category, Keyword: q.Keyword}
+		stats := adpickQueryCoverage{Vertical: q.Vertical, Category: q.Category}
+		if !client.privateKeywords {
+			stats.Keyword = q.Keyword
+		}
 		var offers []adpickOffer
 		if err := client.request(ctx, "search", url.Values{"q": {q.Keyword}, "limit": {strconv.Itoa(limit)}}, &offers); err != nil {
 			return records, err
@@ -315,7 +318,7 @@ func collectAdpickCatalog(ctx context.Context, client *adpickClient, queries []a
 			record := merchant
 			record.RecordType, record.ItemKey, record.CategorySlug = "offer", key, q.Category
 			record.Title, record.Description, record.ImageURL, record.AffiliateURL = title, "", safeAdpickURL(offer.Photo, false), link
-			record.PriceText, record.PriceKRW, record.SearchKeyword = adpickText(offer.Price, 100), adpickPrice(offer.Price), q.Keyword
+			record.PriceText, record.PriceKRW, record.SearchKeyword = adpickText(offer.Price, 100), adpickPrice(offer.Price), stats.Keyword
 			queryRecords = append(queryRecords, record)
 			stats.NewOffers++
 		}

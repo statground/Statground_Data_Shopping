@@ -1,0 +1,14 @@
+{
+  "adpick-travel": {
+    "stays": ["호텔", "숙소", "펜션", "리조트", "호스텔", "hotel", "hostel", "resort"],
+    "flights": ["항공권", "비행기", "항공편", "항공사", "flight", "airline", "airfare"],
+    "experiences": ["관광", "입장권", "박물관", "미술관", "투어", "테마파크", "museum", "attraction", "sightseeing"],
+    "packages": ["여행", "패키지여행", "가족여행", "신혼여행", "배낭여행", "vacation", "honeymoon"]
+  },
+  "adpick-services": {
+    "design": ["디자인", "로고", "일러스트", "편집디자인", "브랜딩", "design", "logo", "illustration"],
+    "development": ["프로그래밍", "개발", "웹사이트", "홈페이지", "앱개발", "programming", "website", "development"],
+    "marketing": ["마케팅", "광고", "검색최적화", "홍보", "marketing", "advertising", "seo"],
+    "writing": ["번역", "통역", "교정", "작문", "글쓰기", "카피라이팅", "translation", "writing", "copywriting"]
+  }
+}

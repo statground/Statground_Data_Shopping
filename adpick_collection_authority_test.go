@@ -60,11 +60,12 @@ func TestAdpickDailyCollectionCannotExpandProfileOrQueries(t *testing.T) {
 	t.Setenv("ADPICK_QUERY_PROFILE", "diagnostic")
 	t.Setenv("ADPICK_SEARCH_QUERIES_JSON", `[{"vertical":"diagnostic","category":"retail_control","keyword":"노트북"}]`)
 	t.Setenv("ADPICK_SEARCH_LIMIT", "1")
+	t.Setenv("ADPICK_KEYWORD_DISCOVERY_ENABLED", "true")
 	plan, err := adpickCollectionPlanFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(plan.queries, defaultAdpickQueries) || plan.searchLimit != 20 || plan.directoryOnly {
+	if !reflect.DeepEqual(plan.queries, defaultAdpickQueries) || plan.searchLimit != 20 || plan.directoryOnly || !plan.useKeywordPool {
 		t.Fatalf("daily plan changed its standard travel/services scope: %+v", plan)
 	}
 	for _, query := range plan.queries {
@@ -83,8 +84,9 @@ func TestAdpickHumanCollectionRequiresConfirmationAndPreservesProfile(t *testing
 	t.Setenv("ADPICK_QUERY_PROFILE", "directory")
 	t.Setenv("ADPICK_SEARCH_QUERIES_JSON", "")
 	t.Setenv("ADPICK_SEARCH_LIMIT", "20")
+	t.Setenv("ADPICK_KEYWORD_DISCOVERY_ENABLED", "true")
 	plan, err := adpickCollectionPlanFromEnv()
-	if err != nil || !plan.directoryOnly || len(plan.queries) != 0 {
+	if err != nil || !plan.directoryOnly || len(plan.queries) != 0 || plan.useKeywordPool {
 		t.Fatalf("confirmed manual directory plan=%+v error=%v", plan, err)
 	}
 }

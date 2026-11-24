@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/statground/Statground_Data_Shopping/internal/lexicon"
 )
 
 const (
@@ -125,9 +127,27 @@ func RunAdpickCatalogFromEnv(parent context.Context) (resultErr error) {
 	if err := preflightAdpickCatalog(ctx, pub); err != nil {
 		return err
 	}
+	var selections []lexicon.Selection
+	if plan.useKeywordPool {
+		queries, selections, err = buildAdpickKeywordPlan(ctx, queries)
+		if err != nil {
+			report.Failure = "committed_keyword_plan_unavailable"
+			return err
+		}
+		if err := lexicon.Record(ctx, selections); err != nil {
+			report.Failure = "keyword_plan_ack_unverified"
+			return fmt.Errorf("Adpick keyword plan ledger unverified")
+		}
+		client.privateKeywords = true
+		report.KeywordPoolQueries = len(selections) / 2
+		report.QueriesPlanned = len(queries)
+	}
 	runUUID := envString("ADPICK_RUN_UUID", NewUUIDv7())
 	report.RunUUID = runUUID
 	records, searchErr := collectAdpickCatalog(ctx, client, queries, limit, runUUID, NowKST())
+	if len(selections) > 0 && !recordAdpickKeywordOutcomes(ctx, selections, report.Queries) {
+		fmt.Println("Adpick keyword outcomes incomplete; selections remain reserved")
+	}
 	cancel()
 	if searchErr != nil {
 		report.Failure = "search_incomplete"
