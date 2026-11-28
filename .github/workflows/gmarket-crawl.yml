@@ -1,6 +1,15 @@
 name: Shopping Crawl
 
 on:
+  workflow_call:
+    inputs:
+      recovery_only:
+        description: Use the bounded outbox job and skip collection
+        type: boolean
+        required: true
+      recovery_limit:
+        type: number
+        default: 2
   workflow_dispatch:
     inputs:
       run_mode:
@@ -105,7 +114,7 @@ env:
 
 jobs:
   raw_outbox_replay:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'raw_outbox_replay' }}
+    if: ${{ inputs.recovery_only == true || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'raw_outbox_replay') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
@@ -116,7 +125,7 @@ jobs:
       INGEST_MODE: clickhouse
       SHOPPING_RAW_OUTBOX_REPLAY_ONLY: "true"
       SHOPPING_RAW_OUTBOX_REPLAY_ENABLED: "true"
-      SHOPPING_RAW_OUTBOX_REPLAY_LIMIT: ${{ github.event.inputs.raw_outbox_replay_limit || '25' }}
+      SHOPPING_RAW_OUTBOX_REPLAY_LIMIT: ${{ inputs.recovery_limit || github.event.inputs.raw_outbox_replay_limit || '25' }}
       CLICKHOUSE_DIRECT_INSERT_TIMEOUT_SECONDS: "120"
       CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.CLICKHOUSE_DIRECT_INSERT_ATTEMPT_TIMEOUT_SECONDS || '30' }}
       CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS: "90"
@@ -186,7 +195,7 @@ jobs:
         run: go run .
 
   crawl:
-    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl') }}
+    if: ${{ inputs.recovery_only != true && ((github.event_name == 'schedule' && github.event.schedule == '10 */6 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'crawl')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     concurrency:
@@ -431,7 +440,7 @@ jobs:
         run: go run .
 
   detail_enrich:
-    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '40 19 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'detail_enrich') }}
+    if: ${{ inputs.recovery_only != true && ((github.event_name == 'schedule' && github.event.schedule == '40 19 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'detail_enrich')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     concurrency:

@@ -1,0 +1,15 @@
+name: Shopping Raw Outbox Recovery
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    uses: ./.github/workflows/gmarket-crawl.yml
+    with:
+      recovery_only: true
+      recovery_limit: 2
+    secrets: inherit

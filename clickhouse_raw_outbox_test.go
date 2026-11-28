@@ -784,10 +784,11 @@ func TestShoppingWorkflowKeepsRawOutboxReplayManualAndBounded(t *testing.T) {
 	for _, required := range []string{
 		"- raw_outbox_replay",
 		"raw_outbox_replay_limit:",
+		"inputs.recovery_only == true",
 		"github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'raw_outbox_replay'",
 		`SHOPPING_RAW_OUTBOX_REPLAY_ONLY: "true"`,
 		`SHOPPING_RAW_OUTBOX_REPLAY_ENABLED: "true"`,
-		"SHOPPING_RAW_OUTBOX_REPLAY_LIMIT: ${{ github.event.inputs.raw_outbox_replay_limit || '25' }}",
+		"SHOPPING_RAW_OUTBOX_REPLAY_LIMIT: ${{ inputs.recovery_limit || github.event.inputs.raw_outbox_replay_limit || '25' }}",
 		"Replay bounded Shopping raw outbox",
 	} {
 		if !strings.Contains(workflow, required) {
@@ -808,6 +809,19 @@ func TestShoppingWorkflowKeepsRawOutboxReplayManualAndBounded(t *testing.T) {
 	}
 	if got := strings.Count(replayJob, "SHOPPING_RAW_OUTBOX_REPLAY_ENABLED:"); got != 1 {
 		t.Fatalf("manual replay enable count=%d, want 1", got)
+	}
+	if got := strings.Count(workflow, "inputs.recovery_only != true"); got != 2 {
+		t.Fatalf("recovery must skip both collection jobs, got %d guards", got)
+	}
+	button, err := os.ReadFile(".github/workflows/shopping-raw-outbox-recovery.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := string(button)
+	if !strings.Contains(entry, "workflow_dispatch:") || strings.Contains(entry, "schedule:") ||
+		!strings.Contains(entry, "uses: ./.github/workflows/gmarket-crawl.yml") ||
+		!strings.Contains(entry, "recovery_only: true") || !strings.Contains(entry, "recovery_limit: 2") {
+		t.Fatal("the recovery button must call only the shared, bounded replay job")
 	}
 }
 
