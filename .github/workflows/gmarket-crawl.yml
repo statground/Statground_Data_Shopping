@@ -361,12 +361,7 @@ jobs:
           url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
           gmarket_query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
           kurly_query="SELECT count() FROM Data_Shopping_Raw.kurly_product_raw WHERE collect_run_uuid = toUUID('${KURLY_RUN_UUID}') FORMAT TabSeparatedRaw"
-          outbox_query="SELECT count() FROM Data_Shopping_Log.shopping_raw_direct_insert_outbox WHERE replayed_at IS NULL AND replaceAll(target_table, char(96), '') IN ('Data_Shopping_Raw.gmarket_product_raw_endpoint_history', 'Data_Shopping_Raw.kurly_product_raw_endpoint_history') SETTINGS max_threads=1, max_execution_time=10 FORMAT TabSeparatedRaw"
-          pending="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$outbox_query")"
-          if [ "$pending" != "0" ]; then
-            echo "Raw outbox is not confirmed drained; manual replay required before publication"
-            exit 1
-          fi
+          bash scripts/check_shopping_raw_outbox.sh "$url"
           for attempt in $(seq 1 24); do
             gmarket_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$gmarket_query" || true)"
             kurly_count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$kurly_query" || true)"
@@ -600,12 +595,7 @@ jobs:
           esac
           url="${CLICKHOUSE_PROTOCOL}://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}${path}"
           query="SELECT count() FROM Data_Shopping_Raw.gmarket_product_raw WHERE collect_run_uuid = toUUID('${GMARKET_RUN_UUID}') FORMAT TabSeparatedRaw"
-          outbox_query="SELECT count() FROM Data_Shopping_Log.shopping_raw_direct_insert_outbox WHERE replayed_at IS NULL AND replaceAll(target_table, char(96), '') IN ('Data_Shopping_Raw.gmarket_product_raw_endpoint_history', 'Data_Shopping_Raw.kurly_product_raw_endpoint_history') SETTINGS max_threads=1, max_execution_time=10 FORMAT TabSeparatedRaw"
-          pending="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$outbox_query")"
-          if [ "$pending" != "0" ]; then
-            echo "Raw outbox is not confirmed drained; manual replay required before publication"
-            exit 1
-          fi
+          bash scripts/check_shopping_raw_outbox.sh "$url"
           for attempt in $(seq 1 24); do
             count="$(curl -fsS --max-time 20 -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" "$url" --data-binary "$query" || true)"
             count="$(printf '%s' "$count" | tr -d '[:space:]')"

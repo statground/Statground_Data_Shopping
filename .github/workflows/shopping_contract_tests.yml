@@ -39,7 +39,7 @@ jobs:
       - name: Validate pressure-gate and workflow contracts
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -m unittest scripts/test_clickhouse_pressure_gate.py
+        run: python3 -m unittest scripts/test_clickhouse_pressure_gate.py scripts/test_shopping_raw_outbox_gate.py
 
       - name: Validate workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 -format '{{json .}}' .github/workflows/*.yml
