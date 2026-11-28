@@ -12,6 +12,10 @@ on:
         type: boolean
         default: false
         required: true
+      check_product_search_readiness:
+        description: Check the committed keyword pools and BIZ mall configuration without collection or replay
+        type: boolean
+        default: false
   schedule:
     - cron: '25 2 * * *'
 
@@ -27,7 +31,7 @@ concurrency:
 
 jobs:
   adpick_catalog:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '25 2 * * *' && vars.ADPICK_CATALOG_ENABLED != 'false') }}
+    if: ${{ !inputs.check_product_search_readiness && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '25 2 * * *' && vars.ADPICK_CATALOG_ENABLED != 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -287,3 +291,28 @@ jobs:
           path: ${{ runner.temp }}/adpick-mall-search-coverage.json
           if-no-files-found: warn
           retention-days: 14
+
+  adpick_product_search_readiness:
+    if: ${{ github.ref == 'refs/heads/main' && (inputs.check_product_search_readiness || (github.event_name == 'schedule' && github.event.schedule == '25 2 * * *' && vars.ADPICK_CATALOG_ENABLED != 'false')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      ADPICK_KEYWORD_DISCOVERY_ENABLED: ${{ vars.ADPICK_KEYWORD_DISCOVERY_ENABLED || 'false' }}
+      ADPICK_BIZ_SEARCHABLE_MALL_CODES: ${{ vars.ADPICK_BIZ_SEARCHABLE_MALL_CODES }}
+      LEXICON_RUN_ID: ${{ github.run_id }}-readiness
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+      CLICKHOUSE_PROTOCOL: ${{ secrets.CLICKHOUSE_PROTOCOL || secrets.CH_PROTOCOL || 'http' }}
+      CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CLICKHOUSE_HTTP_URL_PATH || secrets.CH_HTTP_URL_PATH }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Report mall and committed keyword readiness
+        run: |
+          set -o pipefail
+          go run . --adpick-product-search-readiness | tee -a "$GITHUB_STEP_SUMMARY"

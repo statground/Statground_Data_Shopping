@@ -3420,6 +3420,16 @@ func RunGmarketCollection(rootCtx context.Context) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--adpick-product-search-readiness" {
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		err := runAdpickProductSearchReadiness(ctx)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--adpick-mall-search-coverage" {
 		if err := runAdpickMallSearchCoverage(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, err)

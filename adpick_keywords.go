@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/statground/Statground_Data_Shopping/internal/lexicon"
@@ -25,14 +26,9 @@ func buildAdpickKeywordPlan(ctx context.Context, base []adpickQuery) ([]adpickQu
 	snapshot := ""
 	for _, vertical := range []string{"travel", "services"} {
 		scope := "adpick-" + vertical
-		queryByWord := map[string]adpickQuery{}
-		for category, words := range categories[scope] {
-			for _, word := range words {
-				if _, exists := queryByWord[word]; exists || !validAdpickCategory(vertical, category) {
-					return nil, nil, fmt.Errorf("invalid Adpick keyword categories")
-				}
-				queryByWord[word] = adpickQuery{vertical, category, word}
-			}
+		queryByWord, err := adpickQueriesByWord(vertical, categories[scope])
+		if err != nil {
+			return nil, nil, err
 		}
 		var curated []string
 		curatedQueries := map[string]adpickQuery{}
@@ -76,6 +72,19 @@ func buildAdpickKeywordPlan(ctx context.Context, base []adpickQuery) ([]adpickQu
 	return queries, selections, nil
 }
 
+func adpickQueriesByWord(vertical string, categories map[string][]string) (map[string]adpickQuery, error) {
+	queries := map[string]adpickQuery{}
+	for category, words := range categories {
+		for _, word := range words {
+			if _, exists := queries[word]; exists || !validAdpickCategory(vertical, category) {
+				return nil, fmt.Errorf("invalid Adpick keyword categories")
+			}
+			queries[word] = adpickQuery{vertical, category, word}
+		}
+	}
+	return queries, nil
+}
+
 func adpickIndependentKeyword(language string, sources []string) bool {
 	if (language != "ko" && language != "en") || len(sources) == 0 {
 		return false
@@ -86,6 +95,41 @@ func adpickIndependentKeyword(language string, sources []string) bool {
 		}
 	}
 	return true
+}
+
+func runAdpickProductSearchReadiness(ctx context.Context) error {
+	var categories map[string]map[string][]string
+	if err := json.Unmarshal(adpickKeywordCategories, &categories); err != nil {
+		return fmt.Errorf("invalid Adpick keyword categories")
+	}
+	fmt.Printf("Scheduled keyword discovery enabled: %t\n", os.Getenv("ADPICK_KEYWORD_DISCOVERY_ENABLED") == "true")
+	malls, err := parseAdpickSearchableMalls(os.Getenv("ADPICK_BIZ_SEARCHABLE_MALL_CODES"))
+	if err != nil {
+		fmt.Println("Account-specific searchable malls: list missing or invalid")
+	} else {
+		fmt.Printf("Account-specific searchable malls configured: %d\n", len(malls))
+	}
+	for _, vertical := range []string{"travel", "services"} {
+		scope := "adpick-" + vertical
+		allowed, err := adpickQueriesByWord(vertical, categories[scope])
+		if err != nil {
+			return err
+		}
+		pool, _, err := lexicon.FromEnv(ctx, scope)
+		if err != nil {
+			fmt.Printf("%s: committed candidate pool unavailable\n", scope)
+			continue
+		}
+		count := 0
+		for _, candidate := range pool {
+			if _, found := allowed[candidate.NormalizedWord]; found && candidate.Scope == scope && adpickIndependentKeyword(candidate.Language, candidate.Sources) {
+				count++
+			}
+		}
+		fmt.Printf("%s: %d eligible committed candidates\n", scope, count)
+	}
+	fmt.Println("New retail-product persistence and publication require mall or seller data-use rights.")
+	return nil
 }
 
 func recordAdpickKeywordOutcomes(ctx context.Context, selections []lexicon.Selection, queries []adpickQueryCoverage) bool {
