@@ -2,12 +2,24 @@ name: Shopping Raw Outbox Recovery
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: [Shopping Crawl]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   replay:
+    # The two pending batches were verified during this crawl. Let it release
+    # the shared writer slot before continuing the bounded recovery.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.id == 46114157744 &&
+       github.event.workflow_run.run_attempt == 1 &&
+       github.event.workflow_run.head_sha == 'd7b9f2e9da72d86fcd584d6bc6647f052a8a2d29' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     uses: ./.github/workflows/gmarket-crawl.yml
     with:
       recovery_only: true
