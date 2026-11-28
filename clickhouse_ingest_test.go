@@ -98,6 +98,10 @@ func TestClickHousePreflightRetryConfigDefaultsAndOverrides(t *testing.T) {
 		"CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME":        "clickhouse-s1-r1",
 		"CLICKHOUSE_PREFLIGHT_RETRY_BUDGET_SECONDS":  "",
 		"CLICKHOUSE_PREFLIGHT_RETRY_BACKOFF_SECONDS": "",
+		"SHOPPING_RAW_DIRECT_OUTBOX_TABLE":           "",
+		"SHOPPING_RAW_OUTBOX_REPLAY_ENABLED":         "",
+		"SHOPPING_RAW_OUTBOX_REPLAY_LIMIT":           "",
+		"CLICKHOUSE_DIRECT_INSERT_CHUNK_SIZE":        "",
 	} {
 		t.Setenv(name, value)
 	}
